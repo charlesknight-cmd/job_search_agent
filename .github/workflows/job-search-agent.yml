@@ -32,6 +32,7 @@ jobs:
           name: latest-job-report
           path: |
             latest_report.txt
+            new_jobs_report.txt
             latest_jobs.csv
             jobs.db
 
@@ -42,7 +43,7 @@ jobs:
           server_port: 465
           username: charles.knight@gmail.com
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "Job Search Report – ${{ github.run_started_at }}"
+          subject: "New Jobs (${{ github.run_started_at }})"
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
-          body: file://latest_report.txt
+          body: file://new_jobs_report.txt
