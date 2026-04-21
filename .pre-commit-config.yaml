@@ -1,0 +1,1 @@
+---\n- repo: https://github.com/psf/black\n  rev: 21.9b0\n  hooks:\n    - id: black\n\n- repo: https://github.com/PyCQA/flake8\n  rev: 3.9.2\n  hooks:\n    - id: flake8\n    - id: flake8-extensions\n
