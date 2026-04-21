@@ -1,13 +1,11 @@
 import re
-import json
-import time
-import math
 import sqlite3
 import hashlib
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -15,6 +13,10 @@ from bs4 import BeautifulSoup
 USER_AGENT = "Mozilla/5.0 (compatible; JobSearchAgent/1.0; +https://example.com)"
 TIMEOUT = 20
 DB_PATH = "jobs.db"
+
+# Minimum prescore (title + employer only) before fetching a detail page.
+# Avoids hammering sites with HTTP requests for obviously irrelevant listings.
+PRESCORE_THRESHOLD = 8
 
 
 @dataclass
@@ -46,7 +48,6 @@ class Job:
 
 CONFIG = {
     "sources": [
-        # Examples. Replace with your own targets.
         {"name": "jobs.ac.uk Senior Management", "kind": "generic_html", "url": "https://www.jobs.ac.uk/search/senior-management"},
         {"name": "jobs.ac.uk University Jobs", "kind": "generic_html", "url": "https://www.jobs.ac.uk/categories/university-jobs/1"},
         {"name": "THE UniJobs UK", "kind": "generic_html", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/"},
@@ -79,7 +80,7 @@ CONFIG = {
         "exclude_keywords": [
             "software engineer", "sales development", "account executive", "nurse", "warehouse"
         ],
-        "preferred_locations": ["united kingdom", "uk", "remote", "hybrid", "london", "scotland"],
+        "preferred_locations": ["united kingdom", "remote", "hybrid", "london", "scotland", "england", "wales"],
         "minimum_score": 25,
     },
     "weights": {
@@ -107,6 +108,7 @@ class Database:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
+        self._migrate()
 
     def _init_db(self):
         self.conn.execute(
@@ -126,20 +128,29 @@ class Database:
                 remote_status TEXT,
                 score REAL,
                 matched_terms TEXT,
-                fetched_at TEXT
+                fetched_at TEXT,
+                first_seen_at TEXT
             )
             """
         )
         self.conn.commit()
 
-    def upsert_job(self, job: Job):
+    def _migrate(self):
+        """Add new columns to existing databases without losing data."""
+        try:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN first_seen_at TEXT")
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+    def upsert_job(self, job: Job, first_seen_at: str):
         self.conn.execute(
             """
             INSERT INTO jobs (
                 fingerprint, source, source_kind, title, employer, location, url,
                 posted_text, description, employment_type, salary_text, remote_status,
-                score, matched_terms, fetched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                score, matched_terms, fetched_at, first_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
                 source=excluded.source,
                 source_kind=excluded.source_kind,
@@ -160,17 +171,39 @@ class Database:
                 job.fingerprint, job.source, job.source_kind, job.title, job.employer,
                 job.location, job.url, job.posted_text, job.description,
                 job.employment_type, job.salary_text, job.remote_status,
-                job.score, job.matched_terms, job.fetched_at,
+                job.score, job.matched_terms, job.fetched_at, first_seen_at,
             ),
         )
         self.conn.commit()
 
-    def top_jobs(self, limit: int = 20, minimum_score: float = 0) -> List[sqlite3.Row]:
+    def top_jobs(self, limit: int = 50, minimum_score: float = 0) -> List[sqlite3.Row]:
         cur = self.conn.execute(
             "SELECT * FROM jobs WHERE score >= ? ORDER BY score DESC, fetched_at DESC LIMIT ?",
             (minimum_score, limit),
         )
         return cur.fetchall()
+
+    def new_jobs(self, hours: int = 25, minimum_score: float = 0) -> List[sqlite3.Row]:
+        """Return jobs first seen within the last `hours` hours, above minimum_score."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cur = self.conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE first_seen_at >= ? AND score >= ?
+            ORDER BY score DESC
+            """,
+            (cutoff, minimum_score),
+        )
+        return cur.fetchall()
+
+    def close(self):
+        self.conn.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
 
 class BaseScraper:
@@ -333,6 +366,46 @@ def dedupe_jobs(jobs: List[Job]) -> List[Job]:
     return out
 
 
+def prescore_job(job: Job, config: Dict[str, Any]) -> float:
+    """
+    Lightweight score using title and employer only — no detail page fetch needed.
+    Used to decide whether a job is worth the extra HTTP request.
+    """
+    weights = config["weights"]
+    exclude_keywords = [k.lower() for k in config["filters"]["exclude_keywords"]]
+
+    title = (job.title or "").lower()
+    employer = (job.employer or "").lower()
+    text = f"{title} {employer}"
+
+    score = 0.0
+
+    senior_terms = ["director", "dean", "pro vice-chancellor", "vice provost", "head of", "chief", "associate director"]
+    if any(t in title for t in senior_terms):
+        score += weights["senior_title"]
+
+    he_terms = ["higher education", "university", "college", "academic", "faculty", "student experience", "student success"]
+    if any(t in text for t in he_terms):
+        score += weights["he_signal"]
+
+    education_terms = ["education", "learning", "teaching", "curriculum"]
+    if any(t in text for t in education_terms):
+        score += weights["education_signal"]
+
+    strategy_terms = ["strategy", "strategic", "transformation", "leadership"]
+    if any(t in text for t in strategy_terms):
+        score += weights["strategy_signal"]
+
+    digital_terms = ["digital", "edtech", "online learning"]
+    if any(t in text for t in digital_terms):
+        score += weights["digital_signal"]
+
+    if any(t in text for t in exclude_keywords):
+        score += weights["exclude_penalty"]
+
+    return score
+
+
 def extract_job_detail(http: requests.Session, job: Job) -> Job:
     try:
         r = http.get(job.url, timeout=TIMEOUT)
@@ -364,8 +437,8 @@ def extract_job_detail(http: requests.Session, job: Job) -> Job:
             loc_match = re.search(r"Location\s*[:\-]?\s*([^|]{1,80})", text, re.IGNORECASE)
             if loc_match:
                 job.location = loc_match.group(1).strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  Detail fetch failed for {job.url}: {exc}")
     return job
 
 
@@ -408,7 +481,8 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["digital_signal"]
         matched.append("digital_signal")
 
-    if any(t in all_text for t in ["united kingdom", "uk", ".ac.uk", "england", "scotland", "wales", "northern ireland"]):
+    # Specific UK signals only - avoids false matches on "truck", "unique", etc.
+    if any(t in all_text for t in [".ac.uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]):
         score += weights["uk_signal"]
         matched.append("uk_signal")
 
@@ -434,9 +508,10 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
     return job
 
 
-def render_report(rows: List[sqlite3.Row]) -> str:
+def render_report(rows: List[sqlite3.Row], title: str = "Job Search Report") -> str:
     lines = []
-    lines.append(f"Job search report generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    lines.append(f"{title} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"{len(rows)} job(s) listed\n")
     for i, r in enumerate(rows, start=1):
         lines.append(f"{i}. {r['title']} — {r['employer']}")
         lines.append(f"   Score: {r['score']} | Location: {r['location'] or 'Unknown'} | Remote: {r['remote_status'] or 'Unknown'}")
@@ -446,10 +521,12 @@ def render_report(rows: List[sqlite3.Row]) -> str:
         lines.append(f"   Match: {r['matched_terms']}")
         lines.append(f"   URL: {r['url']}")
         lines.append("")
+    if not rows:
+        lines.append("No new matching jobs found.")
     return "\n".join(lines)
 
 
-def save_report(report: str, path: str = "latest_report.txt") -> None:
+def save_report(report: str, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(report)
 
@@ -458,7 +535,7 @@ def save_csv(rows: List[sqlite3.Row], path: str = "latest_jobs.csv") -> None:
     import csv
     fields = [
         "title", "employer", "location", "remote_status", "salary_text",
-        "score", "source", "source_kind", "matched_terms", "url", "fetched_at"
+        "score", "source", "source_kind", "matched_terms", "url", "fetched_at", "first_seen_at"
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -471,75 +548,67 @@ def build_sources(config: Dict[str, Any]) -> List[Source]:
     return [Source(**src) for src in config["sources"] if src.get("enabled", True)]
 
 
-def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, str]:
+def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
     http = session()
-    db = Database()
     sources = build_sources(config)
-    total = 0
+    minimum_score = config["filters"]["minimum_score"]
+    now = datetime.now(timezone.utc).isoformat()
+    total_fetched = 0
+    total_stored = 0
+    new_rows = []
 
-    for src in sources:
-        scraper_cls = SCRAPER_MAP.get(src.kind)
-        if not scraper_cls:
-            print(f"Skipping unsupported source kind: {src.kind}")
-            continue
+    with Database() as db:
+        for src in sources:
+            scraper_cls = SCRAPER_MAP.get(src.kind)
+            if not scraper_cls:
+                print(f"Skipping unsupported source kind: {src.kind}")
+                continue
 
-        try:
-            scraper = scraper_cls(src, http)
-            jobs = scraper.fetch()
-            enriched: List[Job] = []
-            for job in jobs:
-                job = extract_job_detail(http, job)
-                job = score_job(job, config)
-                db.upsert_job(job)
-                enriched.append(job)
-                total += 1
-                time.sleep(0.5)
-            print(f"Fetched {len(enriched)} jobs from {src.name}")
-        except Exception as exc:
-            print(f"Error processing {src.name}: {exc}")
+            try:
+                scraper = scraper_cls(src, http)
+                jobs = scraper.fetch()
+                stored = 0
+                skipped = 0
 
-    rows = db.top_jobs(limit=30, minimum_score=config["filters"]["minimum_score"])
-    report = render_report(rows)
-    save_report(report)
-    save_csv(rows)
-    return total, report
+                for job in jobs:
+                    total_fetched += 1
 
+                    # Step 1: prescore on title/employer only — skip detail fetch if irrelevant
+                    ps = prescore_job(job, config)
+                    if ps < PRESCORE_THRESHOLD:
+                        skipped += 1
+                        continue
 
-SCHEDULED_WORKFLOW = r'''
-Local cron example (daily at 07:15):
-15 7 * * * /usr/bin/python3 /path/to/job_search_agent.py >> /path/to/job_search.log 2>&1
-45 16 * * * /usr/bin/python3 /path/to/job_search_agent.py >> /path/to/job_search_pm.log 2>&1
+                    # Step 2: fetch detail page and do full scoring
+                    job = extract_job_detail(http, job)
+                    job = score_job(job, config)
+                    time.sleep(0.5)
 
-GitHub Actions example:
-name: job-search-agent
-on:
-  schedule:
-    - cron: '15 6 * * *'
-    - cron: '45 15 * * *'
-  workflow_dispatch:
-jobs:
-  run-agent:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install requests beautifulsoup4
-      - run: python job_search_agent.py
-      - uses: actions/upload-artifact@v4
-        with:
-          name: latest-job-report
-          path: |
-            latest_report.txt
-            latest_jobs.csv
-            jobs.db
-'''
+                    if job.score >= minimum_score:
+                        db.upsert_job(job, first_seen_at=now)
+                        stored += 1
+                        total_stored += 1
+
+                print(f"  {src.name}: {len(jobs)} listed, {skipped} skipped by prescore, {stored} stored")
+
+            except Exception as exc:
+                print(f"  Error processing {src.name}: {exc}")
+
+        # Full report (all-time top jobs)
+        all_rows = db.top_jobs(limit=50, minimum_score=minimum_score)
+        full_report = render_report(all_rows, title="Full Job Search Report (All Time Top 50)")
+        save_report(full_report, "latest_report.txt")
+        save_csv(all_rows, "latest_jobs.csv")
+
+        # New jobs report (last 25h — covers both daily runs with overlap)
+        new_rows = db.new_jobs(hours=25, minimum_score=minimum_score)
+        new_report = render_report(new_rows, title="New Jobs Since Last Run")
+        save_report(new_report, "new_jobs_report.txt")
+
+    print(f"\nTotal fetched: {total_fetched} | Stored: {total_stored} | New this run: {len(new_rows)}")
+    return total_stored, len(new_rows)
 
 
 if __name__ == "__main__":
-    total, report = run(CONFIG)
-    print(f"Processed {total} job entries\n")
-    print(report)
-    print("\nArtifacts written: latest_report.txt, latest_jobs.csv, jobs.db")
-    print("\n" + SCHEDULED_WORKFLOW)
+    run(CONFIG)
+    print("Artifacts written: latest_report.txt, new_jobs_report.txt, latest_jobs.csv, jobs.db")
