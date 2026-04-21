@@ -436,8 +436,7 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
 
 def render_report(rows: List[sqlite3.Row]) -> str:
     lines = []
-    lines.append(f"Job search report generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-")
+    lines.append(f"Job search report generated {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     for i, r in enumerate(rows, start=1):
         lines.append(f"{i}. {r['title']} — {r['employer']}")
         lines.append(f"   Score: {r['score']} | Location: {r['location'] or 'Unknown'} | Remote: {r['remote_status'] or 'Unknown'}")
@@ -447,8 +446,7 @@ def render_report(rows: List[sqlite3.Row]) -> str:
         lines.append(f"   Match: {r['matched_terms']}")
         lines.append(f"   URL: {r['url']}")
         lines.append("")
-    return "
-".join(lines)
+    return "\n".join(lines)
 
 
 def save_report(report: str, path: str = "latest_report.txt") -> None:
@@ -541,10 +539,7 @@ jobs:
 
 if __name__ == "__main__":
     total, report = run(CONFIG)
-    print(f"Processed {total} job entries
-")
+    print(f"Processed {total} job entries\n")
     print(report)
-    print("
-Artifacts written: latest_report.txt, latest_jobs.csv, jobs.db")
-    print("
-" + SCHEDULED_WORKFLOW)
+    print("\nArtifacts written: latest_report.txt, latest_jobs.csv, jobs.db")
+    print("\n" + SCHEDULED_WORKFLOW)
