@@ -34,3 +34,15 @@ jobs:
             latest_report.txt
             latest_jobs.csv
             jobs.db
+
+      - name: Email report
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: charles.knight@gmail.com
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "Job Search Report – ${{ github.run_started_at }}"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          body: file://latest_report.txt
