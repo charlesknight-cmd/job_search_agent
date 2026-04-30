@@ -2,9 +2,12 @@ name: job-search-agent
 
 on:
   schedule:
-    - cron: '15 6 * * *'   # morning run, UTC
-    - cron: '45 15 * * *'  # afternoon run, UTC
+    - cron: '15 6 * * *'
+    - cron: '45 15 * * *'
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-agent:
@@ -33,6 +36,7 @@ jobs:
           path: |
             latest_report.txt
             new_jobs_report.txt
+            new_jobs_report.html
             latest_jobs.csv
             jobs.db
 
@@ -46,4 +50,4 @@ jobs:
           subject: "New Jobs (${{ github.run_started_at }})"
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
-          body: file://new_jobs_report.txt
+          html_body: file://new_jobs_report.html
