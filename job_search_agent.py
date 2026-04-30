@@ -67,6 +67,11 @@ CONFIG = {
         {"name": "Coursera Careers", "kind": "greenhouse", "url": "https://boards.greenhouse.io/coursera"},
         {"name": "Multiverse Careers", "kind": "greenhouse", "url": "https://boards.greenhouse.io/multiverse"},
         {"name": "Faculty Careers", "kind": "ashby", "url": "https://jobs.ashbyhq.com/faculty"},
+        # HE-specialist executive search & sector jobs
+        {"name": "GatenbySanderson", "kind": "generic_html", "url": "https://www.gatenbysanderson.com/our-roles/"},
+        {"name": "Anderson Quigley", "kind": "generic_html", "url": "https://andersonquigley.com/jobs/"},
+        {"name": "Saxton Bampfylde", "kind": "generic_html", "url": "https://www.saxbam.com/appointments/"},
+        {"name": "WonkHE Jobs", "kind": "generic_html", "url": "https://wonkhe.com/jobs/"},
     ],
     "filters": {
         "include_keywords": [
@@ -461,7 +466,6 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
     if not salary_text:
         return {"points": 0, "label": ""}
 
-    # Pull all numbers from the salary string and take the lowest (the floor)
     nums = re.findall(r"\d[\d,]*", salary_text)
     if not nums:
         return {"points": 0, "label": ""}
@@ -478,7 +482,6 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
 
     floor = min(values)
 
-    # Ignore implausible values (hourly rates, etc.)
     if floor < 10_000 or floor > 500_000:
         return {"points": 0, "label": ""}
 
@@ -490,7 +493,6 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
         return {"points": weights.get("salary_70k_plus", 15), "label": "salary_70k+"}
     if floor >= 60_000:
         return {"points": weights.get("salary_60k_plus", 10), "label": "salary_60k+"}
-    # Known salary but below £60k
     return {"points": weights.get("salary_below_60k", -10), "label": "salary_below_60k"}
 
 
@@ -533,7 +535,6 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["digital_signal"]
         matched.append("digital_signal")
 
-    # Specific UK signals only - avoids false matches on "truck", "unique", etc.
     if any(t in all_text for t in [".ac.uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]):
         score += weights["uk_signal"]
         matched.append("uk_signal")
@@ -542,13 +543,11 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["remote_hybrid_signal"]
         matched.append("remote_hybrid_signal")
 
-    # Salary band scoring — extracts the lower figure and rewards £60k+ roles
     salary_band = _salary_band_score(job.salary_text, weights)
     if salary_band["points"] != 0:
         score += salary_band["points"]
         matched.append(salary_band["label"])
     elif job.salary_text:
-        # Salary present but below threshold or unparseable — still record it
         score += weights.get("salary_signal", 5)
         matched.append("salary_signal")
 
@@ -616,161 +615,4 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
                     padding:20px 24px;margin-bottom:16px;">
           <div style="margin-bottom:12px;">
             <div style="margin-bottom:6px;">
-              <span style="display:inline-block;background:#eef2ff;color:#4f46e5;
-                           font-size:11px;font-weight:700;padding:2px 10px;
-                           border-radius:999px;letter-spacing:.5px;">
-                SCORE &nbsp;{r['score']}
-              </span>
-            </div>
-            <a href="{r['url']}" style="font-size:17px;font-weight:700;color:#111827;
-                                        text-decoration:none;line-height:1.3;">{r['title']}</a>
-            <div style="color:#4b5563;font-size:14px;margin-top:3px;">{r['employer']}</div>
-          </div>
-          <table style="font-size:13px;border-collapse:collapse;width:100%;">
-            <tr>
-              <td style="color:#6b7280;padding:2px 0;width:90px;">Location</td>
-              <td>{r['location'] or 'Unknown'} &nbsp; {badge(r['remote_status'])}</td>
-            </tr>
-            {salary_row}
-            <tr>
-              <td style="color:#6b7280;padding:2px 0;">Source</td>
-              <td>{r['source']}</td>
-            </tr>
-            <tr>
-              <td style="color:#6b7280;padding:2px 0;">Signals</td>
-              <td style="color:#6b7280;font-size:12px;">{r['matched_terms']}</td>
-            </tr>
-          </table>
-          <div style="margin-top:14px;">
-            <a href="{r['url']}" style="display:inline-block;background:#4f46e5;color:#ffffff;
-               padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;
-               text-decoration:none;">View Job &rarr;</a>
-          </div>
-        </div>""")
-
-    body = "\n".join(cards) if cards else (
-        '<p style="color:#6b7280;font-size:15px;">No new matching jobs found since the last run.</p>'
-    )
-
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,
-             'Segoe UI',Helvetica,Arial,sans-serif;">
-  <div style="max-width:640px;margin:32px auto;padding:0 16px;">
-
-    <!-- Header -->
-    <div style="background:#4f46e5;border-radius:8px 8px 0 0;padding:24px 28px;">
-      <div style="color:#ffffff;font-size:20px;font-weight:700;">{title}</div>
-      <div style="color:#c7d2fe;font-size:13px;margin-top:4px;">Generated {now}</div>
-    </div>
-
-    <!-- Count bar -->
-    <div style="background:#eef2ff;padding:12px 28px;border-left:1px solid #e0e7ff;
-                border-right:1px solid #e0e7ff;font-size:14px;color:#3730a3;font-weight:600;">
-      {len(rows)} job{'s' if len(rows) != 1 else ''} found
-    </div>
-
-    <!-- Cards -->
-    <div style="padding:20px 0;">
-      {body}
-    </div>
-
-    <!-- Footer -->
-    <div style="text-align:center;color:#9ca3af;font-size:12px;padding:16px 0 32px;">
-      Sent by job-search-agent &bull; Runs daily at 06:15 and 15:45 UTC
-    </div>
-
-  </div>
-</body>
-</html>"""
-
-
-def save_report(report: str, path: str) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(report)
-
-
-def save_csv(rows: List[sqlite3.Row], path: str = "latest_jobs.csv") -> None:
-    import csv
-    fields = [
-        "title", "employer", "location", "remote_status", "salary_text",
-        "score", "source", "source_kind", "matched_terms", "url", "fetched_at", "first_seen_at"
-    ]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow({k: r[k] for k in fields})
-
-
-def build_sources(config: Dict[str, Any]) -> List[Source]:
-    return [Source(**src) for src in config["sources"] if src.get("enabled", True)]
-
-
-def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
-    http = session()
-    sources = build_sources(config)
-    minimum_score = config["filters"]["minimum_score"]
-    now = datetime.now(timezone.utc).isoformat()
-    total_fetched = 0
-    total_stored = 0
-    new_rows = []
-
-    with Database() as db:
-        for src in sources:
-            scraper_cls = SCRAPER_MAP.get(src.kind)
-            if not scraper_cls:
-                print(f"Skipping unsupported source kind: {src.kind}")
-                continue
-
-            try:
-                scraper = scraper_cls(src, http)
-                jobs = scraper.fetch()
-                stored = 0
-                skipped = 0
-
-                for job in jobs:
-                    total_fetched += 1
-
-                    # Step 1: prescore on title/employer only — skip detail fetch if irrelevant
-                    ps = prescore_job(job, config)
-                    if ps < PRESCORE_THRESHOLD:
-                        skipped += 1
-                        continue
-
-                    # Step 2: fetch detail page and do full scoring
-                    job = extract_job_detail(http, job)
-                    job = score_job(job, config)
-                    time.sleep(0.5)
-
-                    if job.score >= minimum_score:
-                        db.upsert_job(job, first_seen_at=now)
-                        stored += 1
-                        total_stored += 1
-
-                print(f"  {src.name}: {len(jobs)} listed, {skipped} skipped by prescore, {stored} stored")
-
-            except Exception as exc:
-                print(f"  Error processing {src.name}: {exc}")
-
-        # Full report (all-time top jobs)
-        all_rows = db.top_jobs(limit=50, minimum_score=minimum_score)
-        full_report = render_report(all_rows, title="Full Job Search Report (All Time Top 50)")
-        save_report(full_report, "latest_report.txt")
-        save_csv(all_rows, "latest_jobs.csv")
-
-        # New jobs report (last 25h — covers both daily runs with overlap)
-        new_rows = db.new_jobs(hours=25, minimum_score=minimum_score)
-        new_report = render_report(new_rows, title="New Jobs Since Last Run")
-        save_report(new_report, "new_jobs_report.txt")
-        html_report = render_html_report(new_rows, title="New Jobs Since Last Run")
-        save_report(html_report, "new_jobs_report.html")
-
-    print(f"\nTotal fetched: {total_fetched} | Stored: {total_stored} | New this run: {len(new_rows)}")
-    return total_stored, len(new_rows)
-
-
-if __name__ == "__main__":
-    run(CONFIG)
-    print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
+              <span style="display:inline-block;background:#eef
