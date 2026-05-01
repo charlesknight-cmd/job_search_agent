@@ -40,6 +40,7 @@ class Job:
     employment_type: str = ""
     salary_text: str = ""
     remote_status: str = ""
+    closing_date: str = ""
     score: float = 0.0
     matched_terms: str = ""
     fetched_at: str = ""
@@ -139,7 +140,8 @@ class Database:
                 score REAL,
                 matched_terms TEXT,
                 fetched_at TEXT,
-                first_seen_at TEXT
+                first_seen_at TEXT,
+                closing_date TEXT
             )
             """
         )
@@ -147,11 +149,12 @@ class Database:
 
     def _migrate(self):
         """Add new columns to existing databases without losing data."""
-        try:
-            self.conn.execute("ALTER TABLE jobs ADD COLUMN first_seen_at TEXT")
-            self.conn.commit()
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        for col, typedef in [("first_seen_at", "TEXT"), ("closing_date", "TEXT")]:
+            try:
+                self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def upsert_job(self, job: Job, first_seen_at: str):
         self.conn.execute(
@@ -159,8 +162,8 @@ class Database:
             INSERT INTO jobs (
                 fingerprint, source, source_kind, title, employer, location, url,
                 posted_text, description, employment_type, salary_text, remote_status,
-                score, matched_terms, fetched_at, first_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                closing_date, score, matched_terms, fetched_at, first_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
                 source=excluded.source,
                 source_kind=excluded.source_kind,
@@ -173,6 +176,7 @@ class Database:
                 employment_type=excluded.employment_type,
                 salary_text=excluded.salary_text,
                 remote_status=excluded.remote_status,
+                closing_date=excluded.closing_date,
                 score=excluded.score,
                 matched_terms=excluded.matched_terms,
                 fetched_at=excluded.fetched_at
@@ -181,28 +185,36 @@ class Database:
                 job.fingerprint, job.source, job.source_kind, job.title, job.employer,
                 job.location, job.url, job.posted_text, job.description,
                 job.employment_type, job.salary_text, job.remote_status,
-                job.score, job.matched_terms, job.fetched_at, first_seen_at,
+                job.closing_date, job.score, job.matched_terms, job.fetched_at, first_seen_at,
             ),
         )
         self.conn.commit()
 
     def top_jobs(self, limit: int = 50, minimum_score: float = 0) -> List[sqlite3.Row]:
+        today = datetime.now(timezone.utc).date().isoformat()
         cur = self.conn.execute(
-            "SELECT * FROM jobs WHERE score >= ? ORDER BY score DESC, fetched_at DESC LIMIT ?",
-            (minimum_score, limit),
+            """SELECT * FROM jobs
+               WHERE score >= ?
+               AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
+               ORDER BY score DESC, fetched_at DESC LIMIT ?""",
+            (minimum_score, today, limit),
         )
         return cur.fetchall()
 
     def new_jobs(self, hours: int = 25, minimum_score: float = 0) -> List[sqlite3.Row]:
-        """Return jobs first seen within the last `hours` hours, above minimum_score."""
+        """Return jobs first seen within the last `hours` hours, above minimum_score,
+        excluding any whose closing date has already passed."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         cur = self.conn.execute(
-            """
-            SELECT * FROM jobs
-            WHERE first_seen_at >= ? AND score >= ?
-            ORDER BY score DESC
-            """,
-            (cutoff, minimum_score),
+            """SELECT * FROM jobs
+               WHERE first_seen_at >= ? AND score >= ?
+               AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
+               ORDER BY
+                 CASE WHEN closing_date IS NOT NULL AND closing_date != ''
+                      THEN closing_date ELSE '9999-99-99' END ASC,
+                 score DESC""",
+            (cutoff, minimum_score, today),
         )
         return cur.fetchall()
 
@@ -416,6 +428,64 @@ def prescore_job(job: Job, config: Dict[str, Any]) -> float:
     return score
 
 
+def extract_closing_date(text: str) -> str:
+    """
+    Attempt to extract a closing/deadline date from job description text.
+    Returns an ISO date string (YYYY-MM-DD) or empty string if not found.
+    """
+    MONTHS = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+    }
+
+    trigger = (
+        r"(?:closing date|close date|application deadline|applications close|"
+        r"deadline for applications|apply by|closes|deadline)\s*[:\-]?\s*"
+    )
+
+    patterns = [
+        # "15 May 2026" or "15th May 2026"
+        trigger + r"(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})",
+        # "May 15, 2026" or "May 15 2026"
+        trigger + r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})",
+        # "15/05/2026" or "15-05-2026"
+        trigger + r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})",
+        # ISO: "2026-05-15"
+        trigger + r"(\d{4})-(\d{2})-(\d{2})",
+    ]
+
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if not m:
+            continue
+        groups = m.groups()
+        try:
+            if len(groups) == 3:
+                a, b, c = groups
+                # ISO pattern
+                if len(a) == 4:
+                    return f"{int(a):04d}-{int(b):02d}-{int(c):02d}"
+                # DD/MM/YYYY
+                if a.isdigit() and b.isdigit():
+                    return f"{int(c):04d}-{int(b):02d}-{int(a):02d}"
+                # DD Month YYYY
+                if a.isdigit() and b.isalpha():
+                    month = MONTHS.get(b.lower())
+                    if month:
+                        return f"{int(c):04d}-{month:02d}-{int(a):02d}"
+                # Month DD YYYY
+                if a.isalpha() and b.isdigit():
+                    month = MONTHS.get(a.lower())
+                    if month:
+                        return f"{int(c):04d}-{month:02d}-{int(b):02d}"
+        except (ValueError, TypeError):
+            continue
+    return ""
+
+
 def extract_job_detail(http: requests.Session, job: Job) -> Job:
     try:
         r = http.get(job.url, timeout=TIMEOUT)
@@ -447,6 +517,10 @@ def extract_job_detail(http: requests.Session, job: Job) -> Job:
             loc_match = re.search(r"Location\s*[:\-]?\s*([^|]{1,80})", text, re.IGNORECASE)
             if loc_match:
                 job.location = loc_match.group(1).strip()
+
+        if not job.closing_date:
+            job.closing_date = extract_closing_date(text)
+
     except Exception as exc:
         print(f"  Detail fetch failed for {job.url}: {exc}")
     return job
@@ -466,6 +540,7 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
     if not salary_text:
         return {"points": 0, "label": ""}
 
+    # Pull all numbers from the salary string and take the lowest (the floor)
     nums = re.findall(r"\d[\d,]*", salary_text)
     if not nums:
         return {"points": 0, "label": ""}
@@ -482,6 +557,7 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
 
     floor = min(values)
 
+    # Ignore implausible values (hourly rates, etc.)
     if floor < 10_000 or floor > 500_000:
         return {"points": 0, "label": ""}
 
@@ -493,6 +569,7 @@ def _salary_band_score(salary_text: str, weights: Dict[str, Any]) -> Dict[str, A
         return {"points": weights.get("salary_70k_plus", 15), "label": "salary_70k+"}
     if floor >= 60_000:
         return {"points": weights.get("salary_60k_plus", 10), "label": "salary_60k+"}
+    # Known salary but below £60k
     return {"points": weights.get("salary_below_60k", -10), "label": "salary_below_60k"}
 
 
@@ -535,6 +612,7 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["digital_signal"]
         matched.append("digital_signal")
 
+    # Specific UK signals only - avoids false matches on "truck", "unique", etc.
     if any(t in all_text for t in [".ac.uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]):
         score += weights["uk_signal"]
         matched.append("uk_signal")
@@ -543,11 +621,13 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["remote_hybrid_signal"]
         matched.append("remote_hybrid_signal")
 
+    # Salary band scoring — extracts the lower figure and rewards £60k+ roles
     salary_band = _salary_band_score(job.salary_text, weights)
     if salary_band["points"] != 0:
         score += salary_band["points"]
         matched.append(salary_band["label"])
     elif job.salary_text:
+        # Salary present but below threshold or unparseable — still record it
         score += weights.get("salary_signal", 5)
         matched.append("salary_signal")
 
@@ -574,6 +654,8 @@ def render_report(rows: List[sqlite3.Row], title: str = "Job Search Report") -> 
         lines.append(f"   Score: {r['score']} | Location: {r['location'] or 'Unknown'} | Remote: {r['remote_status'] or 'Unknown'}")
         if r['salary_text']:
             lines.append(f"   Salary: {r['salary_text']}")
+        if r['closing_date']:
+            lines.append(f"   Closes: {r['closing_date']}")
         lines.append(f"   Source: {r['source']} ({r['source_kind']})")
         lines.append(f"   Match: {r['matched_terms']}")
         lines.append(f"   URL: {r['url']}")
@@ -602,6 +684,33 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
             f'text-transform:uppercase;letter-spacing:.5px;">{label}</span>'
         )
 
+    today = datetime.now().date()
+
+    def closing_date_row(cd: str) -> str:
+        if not cd:
+            return ""
+        try:
+            d = datetime.strptime(cd, "%Y-%m-%d").date()
+            days_left = (d - today).days
+            label = d.strftime("%-d %B %Y")
+            if days_left < 0:
+                return ""  # expired — shouldn't appear but guard anyway
+            elif days_left <= 3:
+                colour = "#dc2626"  # red
+                urgency = f" — <strong>CLOSES IN {days_left} DAY{'S' if days_left != 1 else ''}!</strong>"
+            elif days_left <= 7:
+                colour = "#d97706"  # amber
+                urgency = f" — closes in {days_left} days"
+            else:
+                colour = "#374151"  # neutral
+                urgency = ""
+            return (
+                f'<tr><td style="color:#6b7280;padding:2px 0;width:90px;">Closes</td>'
+                f'<td style="color:{colour};font-weight:600;">{label}{urgency}</td></tr>'
+            )
+        except ValueError:
+            return ""
+
     cards = []
     for r in rows:
         salary_row = ""
@@ -610,9 +719,168 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
                 f'<tr><td style="color:#6b7280;padding:2px 0;width:90px;">Salary</td>'
                 f'<td style="font-weight:600;color:#059669;">{r["salary_text"]}</td></tr>'
             )
+        deadline_row = closing_date_row(r["closing_date"] or "")
         cards.append(f"""
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;
                     padding:20px 24px;margin-bottom:16px;">
           <div style="margin-bottom:12px;">
             <div style="margin-bottom:6px;">
-              <span style="display:inline-block;background:#eef
+              <span style="display:inline-block;background:#eef2ff;color:#4f46e5;
+                           font-size:11px;font-weight:700;padding:2px 10px;
+                           border-radius:999px;letter-spacing:.5px;">
+                SCORE &nbsp;{r['score']}
+              </span>
+            </div>
+            <a href="{r['url']}" style="font-size:17px;font-weight:700;color:#111827;
+                                        text-decoration:none;line-height:1.3;">{r['title']}</a>
+            <div style="color:#4b5563;font-size:14px;margin-top:3px;">{r['employer']}</div>
+          </div>
+          <table style="font-size:13px;border-collapse:collapse;width:100%;">
+            <tr>
+              <td style="color:#6b7280;padding:2px 0;width:90px;">Location</td>
+              <td>{r['location'] or 'Unknown'} &nbsp; {badge(r['remote_status'])}</td>
+            </tr>
+            {salary_row}
+            {deadline_row}
+            <tr>
+              <td style="color:#6b7280;padding:2px 0;">Source</td>
+              <td>{r['source']}</td>
+            </tr>
+            <tr>
+              <td style="color:#6b7280;padding:2px 0;">Signals</td>
+              <td style="color:#6b7280;font-size:12px;">{r['matched_terms']}</td>
+            </tr>
+          </table>
+          <div style="margin-top:14px;">
+            <a href="{r['url']}" style="display:inline-block;background:#4f46e5;color:#ffffff;
+               padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;
+               text-decoration:none;">View Job &rarr;</a>
+          </div>
+        </div>""")
+
+    body = "\n".join(cards) if cards else (
+        '<p style="color:#6b7280;font-size:15px;">No new matching jobs found since the last run.</p>'
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,
+             'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="max-width:640px;margin:32px auto;padding:0 16px;">
+
+    <!-- Header -->
+    <div style="background:#4f46e5;border-radius:8px 8px 0 0;padding:24px 28px;">
+      <div style="color:#ffffff;font-size:20px;font-weight:700;">{title}</div>
+      <div style="color:#c7d2fe;font-size:13px;margin-top:4px;">Generated {now}</div>
+    </div>
+
+    <!-- Count bar -->
+    <div style="background:#eef2ff;padding:12px 28px;border-left:1px solid #e0e7ff;
+                border-right:1px solid #e0e7ff;font-size:14px;color:#3730a3;font-weight:600;">
+      {len(rows)} job{'s' if len(rows) != 1 else ''} found
+    </div>
+
+    <!-- Cards -->
+    <div style="padding:20px 0;">
+      {body}
+    </div>
+
+    <!-- Footer -->
+    <div style="text-align:center;color:#9ca3af;font-size:12px;padding:16px 0 32px;">
+      Sent by job-search-agent &bull; Runs daily at 06:15 and 15:45 UTC
+    </div>
+
+  </div>
+</body>
+</html>"""
+
+
+def save_report(report: str, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(report)
+
+
+def save_csv(rows: List[sqlite3.Row], path: str = "latest_jobs.csv") -> None:
+    import csv
+    fields = [
+        "title", "employer", "location", "remote_status", "salary_text",
+        "score", "source", "source_kind", "matched_terms", "url", "closing_date", "fetched_at", "first_seen_at"
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r[k] for k in fields})
+
+
+def build_sources(config: Dict[str, Any]) -> List[Source]:
+    return [Source(**src) for src in config["sources"] if src.get("enabled", True)]
+
+
+def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
+    http = session()
+    sources = build_sources(config)
+    minimum_score = config["filters"]["minimum_score"]
+    now = datetime.now(timezone.utc).isoformat()
+    total_fetched = 0
+    total_stored = 0
+    new_rows = []
+
+    with Database() as db:
+        for src in sources:
+            scraper_cls = SCRAPER_MAP.get(src.kind)
+            if not scraper_cls:
+                print(f"Skipping unsupported source kind: {src.kind}")
+                continue
+
+            try:
+                scraper = scraper_cls(src, http)
+                jobs = scraper.fetch()
+                stored = 0
+                skipped = 0
+
+                for job in jobs:
+                    total_fetched += 1
+
+                    # Step 1: prescore on title/employer only — skip detail fetch if irrelevant
+                    ps = prescore_job(job, config)
+                    if ps < PRESCORE_THRESHOLD:
+                        skipped += 1
+                        continue
+
+                    # Step 2: fetch detail page and do full scoring
+                    job = extract_job_detail(http, job)
+                    job = score_job(job, config)
+                    time.sleep(0.5)
+
+                    if job.score >= minimum_score:
+                        db.upsert_job(job, first_seen_at=now)
+                        stored += 1
+                        total_stored += 1
+
+                print(f"  {src.name}: {len(jobs)} listed, {skipped} skipped by prescore, {stored} stored")
+
+            except Exception as exc:
+                print(f"  Error processing {src.name}: {exc}")
+
+        # Full report (all-time top jobs)
+        all_rows = db.top_jobs(limit=50, minimum_score=minimum_score)
+        full_report = render_report(all_rows, title="Full Job Search Report (All Time Top 50)")
+        save_report(full_report, "latest_report.txt")
+        save_csv(all_rows, "latest_jobs.csv")
+
+        # New jobs report (last 25h — covers both daily runs with overlap)
+        new_rows = db.new_jobs(hours=25, minimum_score=minimum_score)
+        new_report = render_report(new_rows, title="New Jobs Since Last Run")
+        save_report(new_report, "new_jobs_report.txt")
+        html_report = render_html_report(new_rows, title="New Jobs Since Last Run")
+        save_report(html_report, "new_jobs_report.html")
+
+    print(f"\nTotal fetched: {total_fetched} | Stored: {total_stored} | New this run: {len(new_rows)}")
+    return total_stored, len(new_rows)
+
+
+if __name__ == "__main__":
+    run(CONFIG)
+    print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
