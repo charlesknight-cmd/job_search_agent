@@ -296,6 +296,21 @@ class Database:
         )
         return cur.fetchall()
 
+    def weekly_jobs(self, days: int = 7, limit: int = 10, minimum_score: float = 0) -> list:
+        """Top-scoring canonical jobs first seen within the past `days` days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
+        cur = self.conn.execute(
+            """SELECT * FROM jobs
+               WHERE first_seen_at >= ? AND score >= ?
+               AND (canonical_id IS NULL OR canonical_id = fingerprint)
+               AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
+               ORDER BY score DESC
+               LIMIT ?""",
+            (cutoff, minimum_score, today, limit),
+        )
+        return cur.fetchall()
+
     def close(self):
         self.conn.close()
 
@@ -918,6 +933,115 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
 </html>"""
 
 
+def render_html_digest(rows, config: dict = None) -> str:
+    """Compact weekly digest — top 10 jobs ranked by score."""
+    import json
+    now = datetime.now().strftime("%Y-%m-%d")
+    week_start = (datetime.now() - timedelta(days=6)).strftime("%-d %b")
+    week_end = datetime.now().strftime("%-d %b %Y")
+    minimum_score = (config or {}).get("filters", {}).get("minimum_score", 0)
+
+    today = datetime.now().date()
+
+    def deadline_badge(cd: str) -> str:
+        if not cd:
+            return ""
+        try:
+            d = datetime.strptime(cd, "%Y-%m-%d").date()
+            days_left = (d - today).days
+            if days_left < 0:
+                return ""
+            label = d.strftime("%-d %b")
+            if days_left <= 3:
+                colour, txt = "#dc2626", f"{label} (!)"
+            elif days_left <= 7:
+                colour, txt = "#d97706", label
+            else:
+                colour, txt = "#6b7280", label
+            return (
+                f'<span style="color:{colour};font-size:11px;font-weight:600;">'
+                f'{txt}</span>'
+            )
+        except ValueError:
+            return ""
+
+    rows_html = ""
+    for rank, r in enumerate(rows, start=1):
+        try:
+            sources_list = json.loads(r["all_sources"] or "[]")
+        except Exception:
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+        if not sources_list:
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+        primary_url = sources_list[0]["url"]
+        source_label = ", ".join(s["source"] for s in sources_list)
+
+        dl = deadline_badge(r["closing_date"] or "")
+        dl_cell = f'<td style="padding:8px 6px;white-space:nowrap;">{dl}</td>' if dl else '<td></td>'
+
+        bg = "#fafafa" if rank % 2 == 0 else "#ffffff"
+        rows_html += f"""
+        <tr style="background:{bg};">
+          <td style="padding:8px 10px;font-size:13px;font-weight:700;color:#4f46e5;
+                     text-align:center;width:28px;">{rank}</td>
+          <td style="padding:8px 6px;">
+            <a href="{primary_url}" style="font-size:14px;font-weight:600;color:#111827;
+               text-decoration:none;">{r['title']}</a>
+            <div style="font-size:12px;color:#6b7280;margin-top:1px;">{r['employer']}</div>
+          </td>
+          <td style="padding:8px 6px;font-size:12px;color:#374151;white-space:nowrap;">
+            {r['score']}
+          </td>
+          {dl_cell}
+          <td style="padding:8px 6px;font-size:11px;color:#9ca3af;">{source_label}</td>
+        </tr>"""
+
+    if not rows_html:
+        rows_html = """
+        <tr><td colspan="5" style="padding:20px;text-align:center;color:#9ca3af;">
+          No new jobs this week.
+        </td></tr>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,
+             'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="max-width:640px;margin:32px auto;padding:0 16px;">
+
+    <div style="background:#4f46e5;border-radius:8px 8px 0 0;padding:20px 24px;">
+      <div style="color:#ffffff;font-size:18px;font-weight:700;">
+        Weekly Digest &mdash; Top {len(rows)} Jobs
+      </div>
+      <div style="color:#c7d2fe;font-size:12px;margin-top:3px;">
+        {week_start} &ndash; {week_end}
+      </div>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;background:#ffffff;
+                  border:1px solid #e5e7eb;border-top:none;">
+      <thead>
+        <tr style="background:#f3f4f6;border-bottom:2px solid #e5e7eb;">
+          <th style="padding:8px 10px;font-size:11px;color:#6b7280;text-align:center;">#</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;text-align:left;">Role</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;">Score</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;">Closes</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;text-align:left;">Source</th>
+        </tr>
+      </thead>
+      <tbody>{rows_html}
+      </tbody>
+    </table>
+
+    <div style="text-align:center;color:#9ca3af;font-size:11px;padding:16px 0 28px;">
+      Sent by job-search-agent &bull; Weekly digest every Friday
+    </div>
+
+  </div>
+</body>
+</html>"""
+
+
 def save_report(report: str, path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(report)
@@ -1009,6 +1133,30 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
     return total_stored, len(new_rows)
 
 
+def run_weekly_digest(config: dict = CONFIG) -> int:
+    """Generate and save the weekly digest (top 10 from the past 7 days)."""
+    minimum_score = config["filters"]["minimum_score"]
+    with Database() as db:
+        rows = db.weekly_jobs(days=7, limit=10, minimum_score=minimum_score)
+        html = render_html_digest(rows, config=config)
+        save_report(html, "weekly_digest.html")
+    print(f"Weekly digest: {len(rows)} jobs → weekly_digest.html")
+    return len(rows)
+
+
 if __name__ == "__main__":
-    run(CONFIG)
-    print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
+    import argparse
+    parser = argparse.ArgumentParser(description="Job Search Agent")
+    parser.add_argument(
+        "--weekly",
+        action="store_true",
+        help="Generate weekly digest instead of running the full scrape",
+    )
+    args = parser.parse_args()
+
+    if args.weekly:
+        run_weekly_digest(CONFIG)
+        print("Artifact written: weekly_digest.html")
+    else:
+        run(CONFIG)
+        print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
