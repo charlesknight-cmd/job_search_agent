@@ -141,7 +141,9 @@ class Database:
                 matched_terms TEXT,
                 fetched_at TEXT,
                 first_seen_at TEXT,
-                closing_date TEXT
+                closing_date TEXT,
+                canonical_id TEXT,
+                all_sources TEXT
             )
             """
         )
@@ -149,21 +151,92 @@ class Database:
 
     def _migrate(self):
         """Add new columns to existing databases without losing data."""
-        for col, typedef in [("first_seen_at", "TEXT"), ("closing_date", "TEXT")]:
+        for col, typedef in [
+            ("first_seen_at", "TEXT"),
+            ("closing_date", "TEXT"),
+            ("canonical_id", "TEXT"),
+            ("all_sources", "TEXT"),
+        ]:
             try:
                 self.conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typedef}")
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
-    def upsert_job(self, job: Job, first_seen_at: str):
+        # Back-fill canonical_id = fingerprint for any pre-migration rows
+        self.conn.execute(
+            "UPDATE jobs SET canonical_id = fingerprint WHERE canonical_id IS NULL"
+        )
+        self.conn.commit()
+
+    def find_canonical(self, title: str, employer: str) -> Optional[str]:
+        """
+        Return the fingerprint of an existing job that looks like the same role,
+        or None if no match found.  Matching rule: same normalised employer AND
+        Jaccard word-overlap on title ≥ 0.70.
+        """
+        norm_employer = _normalize_text(employer)
+        norm_title = set(_normalize_text(title).split())
+        if not norm_title:
+            return None
+
+        # Pull candidate canonical rows with the same employer
+        cur = self.conn.execute(
+            "SELECT fingerprint, title FROM jobs WHERE canonical_id = fingerprint AND lower(employer) LIKE ?",
+            (f"%{norm_employer[:30]}%",),
+        )
+        for row in cur.fetchall():
+            candidate_words = set(_normalize_text(row["title"]).split())
+            if not candidate_words:
+                continue
+            overlap = len(norm_title & candidate_words) / len(norm_title | candidate_words)
+            if overlap >= 0.70:
+                return row["fingerprint"]
+        return None
+
+    def merge_into_canonical(self, canonical_fp: str, job: Job) -> None:
+        """
+        Fold a duplicate job into the canonical record:
+        - Update all_sources JSON to include the new source+url
+        - Keep the canonical row's fingerprint; ignore the duplicate's fingerprint
+        """
+        import json
+        cur = self.conn.execute(
+            "SELECT all_sources FROM jobs WHERE fingerprint = ?", (canonical_fp,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return
+        try:
+            sources = json.loads(row["all_sources"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            sources = []
+
+        # Add new source only if URL not already listed
+        existing_urls = {s.get("url") for s in sources}
+        if job.url not in existing_urls:
+            sources.append({"source": job.source, "url": job.url})
+            self.conn.execute(
+                "UPDATE jobs SET all_sources = ? WHERE fingerprint = ?",
+                (json.dumps(sources), canonical_fp),
+            )
+            self.conn.commit()
+
+    def upsert_job(self, job: Job, first_seen_at: str, canonical_id: str = "") -> None:
+        import json
+        if not canonical_id:
+            canonical_id = job.fingerprint
+        # Seed all_sources with the job's own source
+        all_sources = json.dumps([{"source": job.source, "url": job.url}])
+
         self.conn.execute(
             """
             INSERT INTO jobs (
                 fingerprint, source, source_kind, title, employer, location, url,
                 posted_text, description, employment_type, salary_text, remote_status,
-                closing_date, score, matched_terms, fetched_at, first_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                closing_date, score, matched_terms, fetched_at, first_seen_at,
+                canonical_id, all_sources
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
                 source=excluded.source,
                 source_kind=excluded.source_kind,
@@ -179,22 +252,26 @@ class Database:
                 closing_date=excluded.closing_date,
                 score=excluded.score,
                 matched_terms=excluded.matched_terms,
-                fetched_at=excluded.fetched_at
+                fetched_at=excluded.fetched_at,
+                canonical_id=excluded.canonical_id
             """,
             (
                 job.fingerprint, job.source, job.source_kind, job.title, job.employer,
                 job.location, job.url, job.posted_text, job.description,
                 job.employment_type, job.salary_text, job.remote_status,
-                job.closing_date, job.score, job.matched_terms, job.fetched_at, first_seen_at,
+                job.closing_date, job.score, job.matched_terms, job.fetched_at,
+                first_seen_at, canonical_id, all_sources,
             ),
         )
         self.conn.commit()
 
     def top_jobs(self, limit: int = 50, minimum_score: float = 0) -> List[sqlite3.Row]:
         today = datetime.now(timezone.utc).date().isoformat()
+        # Only return canonical rows (canonical_id = fingerprint) to avoid duplicates
         cur = self.conn.execute(
             """SELECT * FROM jobs
                WHERE score >= ?
+               AND (canonical_id IS NULL OR canonical_id = fingerprint)
                AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
                ORDER BY score DESC, fetched_at DESC LIMIT ?""",
             (minimum_score, today, limit),
@@ -203,18 +280,34 @@ class Database:
 
     def new_jobs(self, hours: int = 25, minimum_score: float = 0) -> List[sqlite3.Row]:
         """Return jobs first seen within the last `hours` hours, above minimum_score,
-        excluding any whose closing date has already passed."""
+        excluding expired roles. Only canonical rows returned (no duplicates)."""
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         today = datetime.now(timezone.utc).date().isoformat()
         cur = self.conn.execute(
             """SELECT * FROM jobs
                WHERE first_seen_at >= ? AND score >= ?
+               AND (canonical_id IS NULL OR canonical_id = fingerprint)
                AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
                ORDER BY
                  CASE WHEN closing_date IS NOT NULL AND closing_date != ''
                       THEN closing_date ELSE '9999-99-99' END ASC,
                  score DESC""",
             (cutoff, minimum_score, today),
+        )
+        return cur.fetchall()
+
+    def weekly_jobs(self, days: int = 7, limit: int = 10, minimum_score: float = 0) -> list:
+        """Top-scoring canonical jobs first seen within the past `days` days."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
+        cur = self.conn.execute(
+            """SELECT * FROM jobs
+               WHERE first_seen_at >= ? AND score >= ?
+               AND (canonical_id IS NULL OR canonical_id = fingerprint)
+               AND (closing_date IS NULL OR closing_date = '' OR closing_date >= ?)
+               ORDER BY score DESC
+               LIMIT ?""",
+            (cutoff, minimum_score, today, limit),
         )
         return cur.fetchall()
 
@@ -386,6 +479,13 @@ def dedupe_jobs(jobs: List[Job]) -> List[Job]:
         seen.add(job.fingerprint)
         out.append(job)
     return out
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace."""
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def prescore_job(job: Job, config: Dict[str, Any]) -> float:
@@ -666,6 +766,7 @@ def render_report(rows: List[sqlite3.Row], title: str = "Job Search Report") -> 
 
 
 def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report") -> str:
+    import json
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     remote_colours = {
@@ -720,6 +821,44 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
                 f'<td style="font-weight:600;color:#059669;">{r["salary_text"]}</td></tr>'
             )
         deadline_row = closing_date_row(r["closing_date"] or "")
+
+        # Build source list from all_sources JSON (may include duplicates from other boards)
+        try:
+            sources_list = json.loads(r["all_sources"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+        if not sources_list:
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+
+        # Primary link = first source (the canonical one)
+        primary_url = sources_list[0]["url"] if sources_list else r["url"]
+
+        # Source chips — one per listing board
+        source_chips = " ".join(
+            f'<a href="{s["url"]}" style="display:inline-block;background:#f3f4f6;color:#374151;'
+            f'border:1px solid #e5e7eb;border-radius:4px;padding:2px 8px;font-size:11px;'
+            f'font-weight:600;text-decoration:none;margin-right:4px;margin-bottom:4px;">'
+            f'{s["source"]}</a>'
+            for s in sources_list
+        )
+
+        # "Also on N boards" label when deduped
+        also_on = ""
+        if len(sources_list) > 1:
+            also_on = (
+                f'<div style="margin-top:6px;font-size:11px;color:#6b7280;">'
+                f'Listed on {len(sources_list)} boards &mdash; apply via any link above</div>'
+            )
+
+        # Multiple "View Job" buttons when deduped
+        apply_buttons = " ".join(
+            f'<a href="{s["url"]}" style="display:inline-block;background:#4f46e5;color:#ffffff;'
+            f'padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;'
+            f'text-decoration:none;margin-right:8px;margin-bottom:6px;">'
+            f'{"View Job" if i == 0 else s["source"]} &rarr;</a>'
+            for i, s in enumerate(sources_list)
+        )
+
         cards.append(f"""
         <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;
                     padding:20px 24px;margin-bottom:16px;">
@@ -731,7 +870,7 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
                 SCORE &nbsp;{r['score']}
               </span>
             </div>
-            <a href="{r['url']}" style="font-size:17px;font-weight:700;color:#111827;
+            <a href="{primary_url}" style="font-size:17px;font-weight:700;color:#111827;
                                         text-decoration:none;line-height:1.3;">{r['title']}</a>
             <div style="color:#4b5563;font-size:14px;margin-top:3px;">{r['employer']}</div>
           </div>
@@ -743,18 +882,16 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
             {salary_row}
             {deadline_row}
             <tr>
-              <td style="color:#6b7280;padding:2px 0;">Source</td>
-              <td>{r['source']}</td>
+              <td style="color:#6b7280;padding:2px 0;vertical-align:top;">Sources</td>
+              <td>{source_chips}{also_on}</td>
             </tr>
             <tr>
               <td style="color:#6b7280;padding:2px 0;">Signals</td>
               <td style="color:#6b7280;font-size:12px;">{r['matched_terms']}</td>
             </tr>
           </table>
-          <div style="margin-top:14px;">
-            <a href="{r['url']}" style="display:inline-block;background:#4f46e5;color:#ffffff;
-               padding:8px 18px;border-radius:6px;font-size:13px;font-weight:600;
-               text-decoration:none;">View Job &rarr;</a>
+          <div style="margin-top:14px;flex-wrap:wrap;">
+            {apply_buttons}
           </div>
         </div>""")
 
@@ -789,6 +926,115 @@ def render_html_report(rows: List[sqlite3.Row], title: str = "Job Search Report"
     <!-- Footer -->
     <div style="text-align:center;color:#9ca3af;font-size:12px;padding:16px 0 32px;">
       Sent by job-search-agent &bull; Runs daily at 06:15 and 15:45 UTC
+    </div>
+
+  </div>
+</body>
+</html>"""
+
+
+def render_html_digest(rows, config: dict = None) -> str:
+    """Compact weekly digest — top 10 jobs ranked by score."""
+    import json
+    now = datetime.now().strftime("%Y-%m-%d")
+    week_start = (datetime.now() - timedelta(days=6)).strftime("%-d %b")
+    week_end = datetime.now().strftime("%-d %b %Y")
+    minimum_score = (config or {}).get("filters", {}).get("minimum_score", 0)
+
+    today = datetime.now().date()
+
+    def deadline_badge(cd: str) -> str:
+        if not cd:
+            return ""
+        try:
+            d = datetime.strptime(cd, "%Y-%m-%d").date()
+            days_left = (d - today).days
+            if days_left < 0:
+                return ""
+            label = d.strftime("%-d %b")
+            if days_left <= 3:
+                colour, txt = "#dc2626", f"{label} (!)"
+            elif days_left <= 7:
+                colour, txt = "#d97706", label
+            else:
+                colour, txt = "#6b7280", label
+            return (
+                f'<span style="color:{colour};font-size:11px;font-weight:600;">'
+                f'{txt}</span>'
+            )
+        except ValueError:
+            return ""
+
+    rows_html = ""
+    for rank, r in enumerate(rows, start=1):
+        try:
+            sources_list = json.loads(r["all_sources"] or "[]")
+        except Exception:
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+        if not sources_list:
+            sources_list = [{"source": r["source"], "url": r["url"]}]
+        primary_url = sources_list[0]["url"]
+        source_label = ", ".join(s["source"] for s in sources_list)
+
+        dl = deadline_badge(r["closing_date"] or "")
+        dl_cell = f'<td style="padding:8px 6px;white-space:nowrap;">{dl}</td>' if dl else '<td></td>'
+
+        bg = "#fafafa" if rank % 2 == 0 else "#ffffff"
+        rows_html += f"""
+        <tr style="background:{bg};">
+          <td style="padding:8px 10px;font-size:13px;font-weight:700;color:#4f46e5;
+                     text-align:center;width:28px;">{rank}</td>
+          <td style="padding:8px 6px;">
+            <a href="{primary_url}" style="font-size:14px;font-weight:600;color:#111827;
+               text-decoration:none;">{r['title']}</a>
+            <div style="font-size:12px;color:#6b7280;margin-top:1px;">{r['employer']}</div>
+          </td>
+          <td style="padding:8px 6px;font-size:12px;color:#374151;white-space:nowrap;">
+            {r['score']}
+          </td>
+          {dl_cell}
+          <td style="padding:8px 6px;font-size:11px;color:#9ca3af;">{source_label}</td>
+        </tr>"""
+
+    if not rows_html:
+        rows_html = """
+        <tr><td colspan="5" style="padding:20px;text-align:center;color:#9ca3af;">
+          No new jobs this week.
+        </td></tr>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,
+             'Segoe UI',Helvetica,Arial,sans-serif;">
+  <div style="max-width:640px;margin:32px auto;padding:0 16px;">
+
+    <div style="background:#4f46e5;border-radius:8px 8px 0 0;padding:20px 24px;">
+      <div style="color:#ffffff;font-size:18px;font-weight:700;">
+        Weekly Digest &mdash; Top {len(rows)} Jobs
+      </div>
+      <div style="color:#c7d2fe;font-size:12px;margin-top:3px;">
+        {week_start} &ndash; {week_end}
+      </div>
+    </div>
+
+    <table style="width:100%;border-collapse:collapse;background:#ffffff;
+                  border:1px solid #e5e7eb;border-top:none;">
+      <thead>
+        <tr style="background:#f3f4f6;border-bottom:2px solid #e5e7eb;">
+          <th style="padding:8px 10px;font-size:11px;color:#6b7280;text-align:center;">#</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;text-align:left;">Role</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;">Score</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;">Closes</th>
+          <th style="padding:8px 6px;font-size:11px;color:#6b7280;text-align:left;">Source</th>
+        </tr>
+      </thead>
+      <tbody>{rows_html}
+      </tbody>
+    </table>
+
+    <div style="text-align:center;color:#9ca3af;font-size:11px;padding:16px 0 28px;">
+      Sent by job-search-agent &bull; Weekly digest every Friday
     </div>
 
   </div>
@@ -843,7 +1089,7 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
                 for job in jobs:
                     total_fetched += 1
 
-                    # Step 1: prescore on title/employer only — skip detail fetch if irrelevant
+                    # Step 1: prescore on title/employer only
                     ps = prescore_job(job, config)
                     if ps < PRESCORE_THRESHOLD:
                         skipped += 1
@@ -855,9 +1101,15 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
                     time.sleep(0.5)
 
                     if job.score >= minimum_score:
-                        db.upsert_job(job, first_seen_at=now)
-                        stored += 1
-                        total_stored += 1
+                        # Step 3: smart de-duplication
+                        canonical_fp = db.find_canonical(job.title, job.employer)
+                        if canonical_fp and canonical_fp != job.fingerprint:
+                            db.merge_into_canonical(canonical_fp, job)
+                            print(f"    ↳ Duplicate merged into canonical {canonical_fp[:8]}…")
+                        else:
+                            db.upsert_job(job, first_seen_at=now, canonical_id=job.fingerprint)
+                            stored += 1
+                            total_stored += 1
 
                 print(f"  {src.name}: {len(jobs)} listed, {skipped} skipped by prescore, {stored} stored")
 
@@ -870,7 +1122,7 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
         save_report(full_report, "latest_report.txt")
         save_csv(all_rows, "latest_jobs.csv")
 
-        # New jobs report (last 25h — covers both daily runs with overlap)
+        # New jobs report (last 25h)
         new_rows = db.new_jobs(hours=25, minimum_score=minimum_score)
         new_report = render_report(new_rows, title="New Jobs Since Last Run")
         save_report(new_report, "new_jobs_report.txt")
@@ -881,6 +1133,30 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
     return total_stored, len(new_rows)
 
 
+def run_weekly_digest(config: dict = CONFIG) -> int:
+    """Generate and save the weekly digest (top 10 from the past 7 days)."""
+    minimum_score = config["filters"]["minimum_score"]
+    with Database() as db:
+        rows = db.weekly_jobs(days=7, limit=10, minimum_score=minimum_score)
+        html = render_html_digest(rows, config=config)
+        save_report(html, "weekly_digest.html")
+    print(f"Weekly digest: {len(rows)} jobs → weekly_digest.html")
+    return len(rows)
+
+
 if __name__ == "__main__":
-    run(CONFIG)
-    print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
+    import argparse
+    parser = argparse.ArgumentParser(description="Job Search Agent")
+    parser.add_argument(
+        "--weekly",
+        action="store_true",
+        help="Generate weekly digest instead of running the full scrape",
+    )
+    args = parser.parse_args()
+
+    if args.weekly:
+        run_weekly_digest(CONFIG)
+        print("Artifact written: weekly_digest.html")
+    else:
+        run(CONFIG)
+        print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
