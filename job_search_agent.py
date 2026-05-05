@@ -13,7 +13,13 @@ from urllib.parse import urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# Setup structured logging
+# --- SYSTEM SETTINGS ---
+# Fix for 403 Forbidden: Mimics a standard Chrome browser[cite: 1]
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+# Fix for Timeouts: 30 seconds for slow institutional servers[cite: 1]
+TIMEOUT = 30 
+PRESCORE_THRESHOLD = 8
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -21,18 +27,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Fix for 403 Forbidden: Mimics a standard Chrome browser
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-TIMEOUT = 30  # Increased for slow institutional servers
-PRESCORE_THRESHOLD = 8
-
 @dataclass
 class Source:
     name: str
-    kind: str  # generic_html | greenhouse | ashby | lever
+    kind: str 
     url: str
-    selector: Optional[str] = None  # NEW: Smart selector to target specific job links
-    enabled: bool = True
+    selector: Optional[str] = None
 
 @dataclass
 class Job:
@@ -42,117 +42,184 @@ class Job:
     employer: str
     location: str
     url: str
-    posted_text: str = ""
     description: str = ""
-    employment_type: str = ""
     salary_text: str = ""
     remote_status: str = ""
-    closing_date: str = ""
     score: float = 0.0
     matched_terms: str = ""
     fetched_at: str = ""
     fingerprint: str = ""
 
-# --- LLM VERIFICATION STUB ---
-async def verify_job_relevance(job: Job) -> bool:
-    """
-    Placeholder for an LLM call to verify if the job matches 
-    high-level consultancy or leadership criteria.
-    """
-    # Example logic: if len(job.description) > 500: return True
-    return True
+# --- SEARCH PROFILES (HE & CHARITY)[cite: 1] ---
+HE_CONFIG = {
+    "label": "Higher Education",
+    "db_path": "jobs_he.db",
+    "output_prefix": "",
+    "sources": [
+        {"name": "jobs.ac.uk Senior Management", "kind": "generic_html", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
+        {"name": "THE UniJobs UK", "kind": "generic_html", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
+        {"name": "University of Oxford Careers", "kind": "generic_html", "url": "https://www.jobs.ox.ac.uk/"},
+        {"name": "Advance HE Careers", "kind": "generic_html", "url": "https://www.advance-he.ac.uk/about-us/work-with-us"},
+    ],
+    "filters": {
+        "include_keywords": ["education", "higher education", "student success", "dean", "director", "governance"],
+        "exclude_keywords": ["software engineer", "nurse", "warehouse"],
+        "minimum_score": 25,
+    },
+    "weights": {
+        "senior_title": 20, "he_signal": 18, "education_signal": 15, "strategy_signal": 12,
+        "uk_signal": 8, "remote_hybrid_signal": 6, "salary_signal": 5, "exclude_penalty": -30
+    }
+}
 
-class AsyncBaseScraper:
-    def __init__(self, src: Source, client: httpx.AsyncClient):
-        self.src, self.client = src, client
-    
-    async def fetch(self) -> List[Job]:
-        raise NotImplementedError
-    
-    def absolute_url(self, rel: str) -> str:
-        return urljoin(self.src.url, rel)
-    
-    def text(self, val: Optional[str]) -> str:
-        return re.sub(r"\s+", " ", val or "").strip()
-    
-    def make_fingerprint(self, title: str, emp: str, url: str) -> str:
-        # Deduplication logic remains consistent
-        return hashlib.sha256(f"{title.lower()}|{emp.lower()}|{url}".encode()).hexdigest()
+CHARITY_CONFIG = {
+    "label": "Charity CEO",
+    "db_path": "charity_jobs.db",
+    "output_prefix": "charity_",
+    "sources": [
+        {"name": "CharityJob", "kind": "generic_html", "url": "https://www.charityjob.co.uk/jobs?keywords=chief+executive+ceo&category=chief-executive"},
+        {"name": "Third Sector Jobs", "kind": "generic_html", "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/"},
+    ],
+    "filters": {
+        "include_keywords": ["chief executive", "ceo", "executive director", "charity", "impact"],
+        "exclude_keywords": ["software engineer", "nurse"],
+        "minimum_score": 20,
+    },
+    "weights": {
+        "senior_title": 25, "sector_signal": 20, "governance_signal": 12, "strategy_signal": 10,
+        "uk_signal": 8, "remote_hybrid_signal": 6, "salary_signal": 5, "exclude_penalty": -30
+    }
+}
 
-class SmartHtmlScraper(AsyncBaseScraper):
-    """
-    Updated Scraper using CSS selectors to reduce 'noise' and footer links.
-    """
-    async def fetch(self) -> List[Job]:
-        try:
-            r = await self.client.get(self.src.url, timeout=TIMEOUT)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.text, "html.parser")
-            jobs: List[Job] = []
-            
-            # Use specific selector if provided, else fallback to broad search
-            selector = self.src.selector or "a[href]"
-            for a in soup.select(selector):
-                href, text = a.get("href", ""), self.text(a.get_text(" "))
-                if href and text and any(k in f"{text} {href}".lower() for k in ["job", "vacan", "career", "role"]):
-                    url = self.absolute_url(href)
-                    jobs.append(Job(
-                        source=self.src.name, 
-                        source_kind=self.src.kind, 
-                        title=text, 
-                        employer=self.src.name,
-                        url=url, 
-                        fetched_at=datetime.now(timezone.utc).isoformat(),
-                        fingerprint=self.make_fingerprint(text, self.src.name, url)
-                    ))
-            return jobs
-        except Exception as e:
-            logger.error(f"Failed to fetch {self.src.name}: {e}")
-            return []
+PROFILES = {"he": HE_CONFIG, "charity": CHARITY_CONFIG}
 
-# --- DATABASE & SCORING LOGIC ---
-# (Keep your existing Database class, prescore_job, and score_job functions here)
+# --- DATABASE ENGINE ---
+class Database:
+    def __init__(self, path: str):
+        self.conn = sqlite3.connect(path)
+        self.conn.row_factory = sqlite3.Row
+        self._init_db()
 
-async def process_source(src: Source, client: httpx.AsyncClient, db: Any, config: Dict):
-    """Handles a single source asynchronously."""
-    scraper = SmartHtmlScraper(src, client)
-    jobs = await scraper.fetch()
-    stored, skipped = 0, 0
+    def _init_db(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                fingerprint TEXT PRIMARY KEY, source TEXT, title TEXT, employer TEXT, 
+                url TEXT, description TEXT, score REAL, matched_terms TEXT, 
+                fetched_at TEXT, first_seen_at TEXT
+            )
+        """)
+        self.conn.commit()
+
+    def find_canonical(self, title: str, employer: str) -> Optional[str]:
+        cur = self.conn.execute("SELECT fingerprint FROM jobs WHERE title = ? AND employer = ?", (title, employer))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def upsert_job(self, job: Job, first_seen_at: str):
+        self.conn.execute("""
+            INSERT INTO jobs (fingerprint, source, title, employer, url, description, score, matched_terms, fetched_at, first_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET score=excluded.score, fetched_at=excluded.fetched_at
+        """, (job.fingerprint, job.source, job.title, job.employer, job.url, job.description, job.score, job.matched_terms, job.fetched_at, first_seen_at))
+        self.conn.commit()
+
+    def get_new_jobs(self, hours: int, min_score: float) -> List[sqlite3.Row]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        return self.conn.execute("SELECT * FROM jobs WHERE first_seen_at >= ? AND score >= ? ORDER BY score DESC", (cutoff, min_score)).fetchall()
+
+    def get_weekly_top(self, days: int, min_score: float) -> List[sqlite3.Row]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        return self.conn.execute("SELECT * FROM jobs WHERE first_seen_at >= ? AND score >= ? ORDER BY score DESC LIMIT 10", (cutoff, min_score)).fetchall()
+
+    def close(self): self.conn.close()
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()
+
+# --- SCORING & SCRAPING ---
+def prescore_job(job: Job, config: Dict) -> float:
+    w = config["weights"]
+    text = f"{job.title} {job.employer}".lower()
+    score = 0.0
+    if any(t in text for t in ["director", "ceo", "head of", "dean"]): score += w["senior_title"]
+    return score
+
+def score_job(job: Job, config: Dict) -> Job:
+    w = config["weights"]
+    all_t = f"{job.title} {job.description} {job.employer}".lower()
+    score, matched = 0.0, []
+    for term, pts, lbl in [("director", w["senior_title"], "senior"), ("university", w.get("he_signal", 0), "he")]:
+        if term in all_t: score += pts; matched.append(lbl)
+    job.score, job.matched_terms = round(score, 1), ", ".join(matched)
+    return job
+
+async def fetch_job_details(client: httpx.AsyncClient, job: Job) -> Job:
+    try:
+        # Polite delay to prevent rate-limiting[cite: 1]
+        await asyncio.sleep(1.0) 
+        r = await client.get(job.url, timeout=TIMEOUT)
+        job.description = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)[:3000]
+    except Exception as e:
+        logger.error(f"Failed details for {job.url}: {e}")
+    return job
+
+# --- REPORTING ---
+def generate_html_report(rows: List[sqlite3.Row], title: str, filename: str):
+    cards = []
+    for r in rows:
+        cards.append(f"""
+            <div style="border:1px solid #ddd; padding:15px; margin-bottom:10px; border-radius:5px;">
+                <h3 style="margin-top:0;">{r['title']}</h3>
+                <p><strong>{r['employer']}</strong> | Score: {r['score']}</p>
+                <p>{r['description'][:200]}...</p>
+                <a href="{r['url']}" style="color:#0056b3;">View Job Opening</a>
+            </div>""")
+    html = f"<html><body style='font-family:sans-serif;'><h1>{title}</h1>{''.join(cards) if cards else '<p>No new jobs found.</p>'}</body></html>"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(html)
+
+# --- RUNNER ---
+async def process_all(profile_name: str, weekly_mode: bool):
+    config = PROFILES[profile_name]
+    logger.info(f"Running {config['label']} (Weekly={weekly_mode})")
     
-    for job in jobs:
-        # Quick filter before detail fetch
-        from __main__ import prescore_job, score_job, extract_job_detail # Assuming these are in the same script
-        
-        if prescore_job(job, config) < PRESCORE_THRESHOLD:
-            skipped += 1
-            continue
-            
-        # Polite delay before detail fetch to prevent rate-limiting
-        await asyncio.sleep(1.0)
-        
-        # Detail fetching would also be moved to an async function in a full implementation
-        # For brevity, calling your existing score logic
-        job = score_job(job, config) # In a real async app, make detail fetch async too
-        
-        if job.score >= config["filters"]["minimum_score"]:
-            can = db.find_canonical(job.title, job.employer)
-            if can and can != job.fingerprint:
-                db.merge_into_canonical(can, job)
-            else:
-                db.upsert_job(job, datetime.now(timezone.utc).isoformat())
-                stored += 1
-                
-    logger.info(f"{src.name}: {len(jobs)} found, {skipped} skipped, {stored} stored")
-
-async def run_async(config: Dict):
-    limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}, limits=limits) as client:
-        from __main__ import Database # Assuming Database class is present
+    async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
         with Database(config["db_path"]) as db:
-            tasks = [process_source(Source(**s), client, db, config) for s in config["sources"]]
-            await asyncio.gather(*tasks)
+            # 1. Scrape listing pages
+            for src_data in config["sources"]:
+                src = Source(**src_data)
+                try:
+                    r = await client.get(src.url, timeout=TIMEOUT)
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    for a in soup.select(src.selector or "a[href]"):
+                        title = a.get_text(" ").strip()
+                        href = a.get("href", "")
+                        if href and len(title) > 5:
+                            url = urljoin(src.url, href)
+                            job = Job(source=src.name, source_kind="html", title=title, employer=src.name, url=url, fetched_at=datetime.now(timezone.utc).isoformat())
+                            job.fingerprint = hashlib.sha256(f"{title}{url}".encode()).hexdigest()
+                            
+                            if prescore_job(job, config) >= PRESCORE_THRESHOLD:
+                                job = await fetch_job_details(client, job)
+                                job = score_job(job, config)
+                                if job.score >= config["filters"]["minimum_score"]:
+                                    db.upsert_job(job, datetime.now(timezone.utc).isoformat())
+                except Exception as e:
+                    logger.error(f"Error scraping {src.name}: {e}")
+
+            # 2. Generate the specific files expected by GitHub Workflow
+            if weekly_mode:
+                jobs = db.get_weekly_top(7, config["filters"]["minimum_score"])
+                fname = f"{config['output_prefix']}weekly_digest.html"
+                generate_html_report(jobs, f"Weekly {config['label']} Digest", fname)
+            else:
+                jobs = db.get_new_jobs(24, config["filters"]["minimum_score"])
+                fname = f"{config['output_prefix']}new_jobs_report.html"
+                generate_html_report(jobs, f"Daily {config['label']} Update", fname)
 
 if __name__ == "__main__":
-    # Example usage
-    # asyncio.run(run_async(CONFIG))
-    pass
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--profile", choices=["he", "charity"], default="he")
+    p.add_argument("--weekly", action="store_true")
+    args = p.parse_args()
+    asyncio.run(process_all(args.profile, args.weekly))
