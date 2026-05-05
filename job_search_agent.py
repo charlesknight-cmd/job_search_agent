@@ -15,7 +15,6 @@ from bs4 import BeautifulSoup
 # --- SYSTEM SETTINGS ---
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 TIMEOUT = 30 
-PRESCORE_THRESHOLD = 8
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,7 +26,6 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Job:
     source: str
-    source_kind: str
     title: str
     employer: str
     url: str
@@ -39,137 +37,155 @@ class Job:
 
 # --- CONFIGURATION ---
 HE_CONFIG = {
-    "label": "Higher Education",
+    "label": "Higher Education Leadership",
     "db_path": "jobs_he.db",
     "output_prefix": "",
-    "filters": {"minimum_score": 25},
+    "filters": {"minimum_score": 30},
     "sources": [
-        {"name": "jobs.ac.uk Senior Management", "kind": "generic_html", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
-        {"name": "THE UniJobs UK", "kind": "generic_html", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
-        {"name": "ULA - University Leadership", "kind": "generic_html", "url": "https://www.ulassociates.co.uk/jobs/"},
-        {"name": "Peridot Partners HE", "kind": "generic_html", "url": "https://www.peridotpartners.co.uk/jobs/"},
-        {"name": "Odgers Berndtson HE", "kind": "generic_html", "url": "https://www.odgersberndtson.com/en-gb/opportunities"},
+        {"name": "jobs.ac.uk", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
+        {"name": "THE UniJobs", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
+        {"name": "Peridot Partners", "url": "https://www.peridotpartners.co.uk/job-role/education-executive-roles/", "selector": ".card-title a"}
     ],
     "weights": {
-        "senior_auto_pass": 50, # For CEO/Director titles
+        "senior_leadership_bonus": 45, # PVC, Registrar, CEO
+        "permanent_signal": 25, # Stability marker
         "expertise_signal": 20, # PSF, Fellowship, NTFS
-        "consultancy_signal": 15, # Interim, Transformation
-        "salary_bonus": 10, # £75k+
-        "flexibility_bonus": 5, # Hybrid/Remote
+        "scotland_remote_bonus": 15, # Geography match
+        "high_value_salary": 15, # £85k+
+        "exclusion_penalty": -50 # Irrelevant roles
     }
 }
 
 CHARITY_CONFIG = {
-    "label": "Charity CEO",
+    "label": "Charity CEO & Board",
     "db_path": "charity_jobs.db",
     "output_prefix": "charity_",
-    "filters": {"minimum_score": 20},
+    "filters": {"minimum_score": 25},
     "sources": [
-        {"name": "CharityJob", "kind": "generic_html", "url": "https://www.charityjob.co.uk/jobs?keywords=chief+executive+ceo&category=chief-executive"},
-        {"name": "Third Sector Jobs", "kind": "generic_html", "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/"},
-        {"name": "Prospectus CEO", "kind": "generic_html", "url": "https://www.prospectus.co.uk/jobs/"},
+        {"name": "CharityJob", "url": "https://www.charityjob.co.uk/jobs?keywords=chief+executive+ceo&category=chief-executive", "selector": "h3 a"},
+        {"name": "Prospectus", "url": "https://www.prospectus.co.uk/jobs/", "selector": ".job-title a"}
     ],
     "weights": {
-        "senior_auto_pass": 50,
-        "governance_signal": 15,
-        "strategy_signal": 10,
+        "senior_leadership_bonus": 50,
+        "permanent_signal": 20
     }
 }
 
 PROFILES = {"he": HE_CONFIG, "charity": CHARITY_CONFIG}
 
 # --- TOOLS ---
-def extract_salary(text: str) -> Optional[int]:
-    match = re.search(r"£(\d{1,3}(?:,\d{3})+)", text)
-    if match:
-        return int(match.group(1).replace(",", ""))
-    return None
+def extract_employer(title: str, description: str, source_name: str) -> str:
+    """Attempts to find the actual institution name"""
+    patterns = [
+        r"(University of [A-Za-z\s]+)",
+        r"([A-Za-z\s]+ University)",
+        r"([A-Za-z\s]+ College)",
+        r"([A-Za-z\s]+ Trust)",
+        r"([A-Za-z\s]+ Council)"
+    ]
+    for p in patterns:
+        match = re.search(p, title) or re.search(p, description[:500])
+        if match: return match.group(1).strip()
+    return source_name
 
 def score_job(job: Job, config: Dict) -> Job:
     w = config["weights"]
     full_text = f"{job.title} {job.description}".lower()
     job.match_reasons = []
 
-    # 1. Seniority Auto-Pass
-    if any(t in job.title.lower() for t in ["ceo", "chief executive", "director of educational excellence"]):
-        job.score += w["senior_auto_pass"]
-        job.match_reasons.append("High Seniority Title")
+    # 1. Leadership & Seniority
+    leadership = ["pro-vice-chancellor", "pvc", "registrar", "chief executive", "ceo", "director of", "dean"]
+    if any(t in job.title.lower() for t in leadership):
+        job.score += w["senior_leadership_bonus"]
+        job.match_reasons.append("Executive Leadership")
 
-    # 2. Expertise & Frameworks
-    expertise_terms = {
-        "professional standards framework": "PSF Expertise",
-        "psf": "PSF Expertise",
-        "fellowship": "Fellowship Program",
-        "ntfs": "NTFS/Teaching Excellence",
-        "national teaching fellowship": "NTFS/Teaching Excellence",
-        "accreditation": "Accreditation Work"
-    }
-    for term, reason in expertise_terms.items():
-        if term in full_text:
-            job.score += w.get("expertise_signal", 15)
-            if reason not in job.match_reasons: job.match_reasons.append(reason)
+    # 2. Stability vs High-Level Interim
+    if "permanent" in full_text or "substantive" in full_text:
+        job.score += w.get("permanent_signal", 25)
+        job.match_reasons.append("Permanent")
+    elif any(t in full_text for t in ["interim", "fixed-term"]):
+        # Only penalize if it's NOT a high-level role
+        if job.score < w["senior_leadership_bonus"]:
+            job.score -= 20
+            job.match_reasons.append("Temporary (Low Priority)")
+        else:
+            job.match_reasons.append("Strategic Interim")
 
-    # 3. Consultancy & Interim Leads
-    for term in ["interim", "contract", "consultancy", "transformation"]:
-        if term in full_text:
-            job.score += w.get("consultancy_signal", 10)
-            job.match_reasons.append("Consultancy/Interim Opportunity")
-            break
+    # 3. Advance HE Expertise
+    expertise = {"psf": "PSF", "ntfs": "NTFS", "fellowship": "Fellowship", "standards framework": "Frameworks"}
+    for key, label in expertise.items():
+        if key in full_text:
+            job.score += w["expertise_signal"]
+            job.match_reasons.append(label)
 
-    # 4. Salary Detection
-    salary = extract_salary(full_text)
-    if salary and salary >= 75000:
-        job.score += w.get("salary_bonus", 10)
-        job.match_reasons.append(f"High Value (£{salary:,})")
-    elif "competitive" in full_text or "grade 10" in full_text:
-        job.score += 5
-        job.match_reasons.append("Competitive/Senior Pay Grade")
+    # 4. Geography (Scotland/Remote)
+    if any(t in full_text for t in ["scotland", "edinburgh", "glasgow", "st andrews", "remote", "hybrid"]):
+        job.score += w.get("scotland_remote_bonus", 15)
+        job.match_reasons.append("Location Match")
 
-    # 5. Flexibility
-    if any(t in full_text for t in ["remote", "hybrid", "flexible working"]):
-        job.score += w.get("flexibility_bonus", 5)
-        job.match_reasons.append("Flexible/Hybrid")
+    # 5. Exclusions
+    if any(t in full_text for t in ["software", "nurse", "warehouse", "developer", "technician"]):
+        job.score += w["exclusion_penalty"]
+        job.match_reasons.append("Irrelevant Sector")
 
     return job
 
-# --- DATABASE & REPORTING ---
+# --- DATABASE ENGINE (NON-DESTRUCTIVE) ---
 class Database:
     def __init__(self, path: str):
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("CREATE TABLE IF NOT EXISTS jobs (fingerprint TEXT PRIMARY KEY, title TEXT, employer TEXT, url TEXT, description TEXT, score REAL, reasons TEXT, fetched_at TEXT, first_seen_at TEXT)")
+        self._migrate()
+
+    def _migrate(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                fingerprint TEXT PRIMARY KEY, title TEXT, employer TEXT, 
+                url TEXT, description TEXT, score REAL, reasons TEXT, 
+                fetched_at TEXT, first_seen_at TEXT
+            )
+        """)
+        # Ensure 'reasons' column exists without dropping table
+        cursor = self.conn.execute("PRAGMA table_info(jobs)")
+        cols = [row[1] for row in cursor.fetchall()]
+        if "reasons" not in cols:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN reasons TEXT")
+        self.conn.commit()
 
     def find_canonical(self, title: str, url: str) -> bool:
         return self.conn.execute("SELECT 1 FROM jobs WHERE title = ? OR url = ?", (title, url)).fetchone() is not None
 
     def upsert_job(self, job: Job):
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute("INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(fingerprint) DO UPDATE SET score=excluded.score", 
-                         (job.fingerprint, job.title, job.employer, job.url, job.description, job.score, ", ".join(job.match_reasons), job.fetched_at, now))
+        self.conn.execute("""
+            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fingerprint) DO UPDATE SET score=excluded.score, reasons=excluded.reasons
+        """, (job.fingerprint, job.title, job.employer, job.url, job.description, job.score, ", ".join(job.match_reasons), job.fetched_at, now))
         self.conn.commit()
 
     def get_recent(self, hours: int, min_score: float):
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         return self.conn.execute("SELECT * FROM jobs WHERE first_seen_at >= ? AND score >= ? ORDER BY score DESC", (cutoff, min_score)).fetchall()
 
-def generate_html_report(rows: List[sqlite3.Row], title: str, filename: str):
+def generate_html_report(rows, title, filename):
     cards = []
     for r in rows:
-        reasons = [f"<span style='background:#e1f5fe; padding:2px 6px; border-radius:3px; margin-right:5px;'>{res}</span>" for res in r['reasons'].split(", ")]
+        reasons = [f"<span style='background:#e8f5e9; padding:2px 6px; border-radius:3px; margin-right:5px; border:1px solid #81c784; font-size:0.8em;'>{res}</span>" for res in (r['reasons'] or "").split(", ")]
         cards.append(f"""
-            <div style="border:1px solid #ddd; padding:15px; margin-bottom:15px; border-radius:8px; font-family: Arial, sans-serif;">
-                <h3 style="margin:0 0 10px 0; color: #003366;">{r['title']}</h3>
+            <div style="border:1px solid #ccc; padding:20px; margin-bottom:20px; border-radius:10px; background:white;">
+                <h3 style="margin:0 0 10px 0; color:#1a237e;">{r['title']}</h3>
                 <p><strong>{r['employer']}</strong> | Score: {r['score']}</p>
-                <div style="margin-bottom:10px; font-size: 0.85em;">{' '.join(reasons)}</div>
-                <p style="color: #555;">{r['description'][:300]}...</p>
-                <a href="{r['url']}" style="background:#0056b3; color:white; padding:8px 15px; text-decoration:none; border-radius:5px; display:inline-block;">View Opportunity</a>
+                <div style="margin-bottom:10px;">{' '.join(reasons)}</div>
+                <p style="color:#666; font-size:0.9em;">{r['description'][:350]}...</p>
+                <a href="{r['url']}" style="background:#1a237e; color:white; padding:10px 15px; text-decoration:none; border-radius:5px; display:inline-block;">View Detail</a>
             </div>""")
     
-    body = "".join(cards) if cards else "<p>No matches met the suitability threshold in this cycle.</p>"
+    content = "".join(cards) if cards else "<p>No high-priority leadership roles found in this cycle.</p>"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"<html><body style='max-width:800px; margin:auto; padding:20px;'><h2>{title}</h2>{body}</body></html>")
+        f.write(f"<html><body style='max-width:800px; margin:auto; padding:40px; background:#fafafa; font-family:sans-serif;'><h2>{title}</h2>{content}</body></html>")
 
-# --- CORE LOGIC ---
+# --- RUNNER ---
 async def process_profile(profile_key: str, weekly: bool):
     cfg = PROFILES[profile_key]
     db = Database(cfg["db_path"])
@@ -179,16 +195,17 @@ async def process_profile(profile_key: str, weekly: bool):
             try:
                 resp = await client.get(src["url"], timeout=TIMEOUT)
                 soup = BeautifulSoup(resp.text, "html.parser")
-                for a in soup.select(src.get("selector", "a[href]")):
+                for a in soup.select(src["selector"]):
                     title, url = a.get_text(" ").strip(), urljoin(src["url"], a.get("href", ""))
                     if len(title) < 10 or db.find_canonical(title, url): continue
                     
-                    # Stage 1: Fast Prescore
-                    if any(t in title.lower() for t in ["director", "head", "dean", "ceo", "chief"]):
-                        await asyncio.sleep(1)
-                        detail_resp = await client.get(url, timeout=TIMEOUT)
-                        job = Job(source=src["name"], source_kind="html", title=title, employer=src["name"], url=url, fetched_at=datetime.now(timezone.utc).isoformat())
-                        job.description = BeautifulSoup(detail_resp.text, "html.parser").get_text(" ", strip=True)[:4000]
+                    # Prescore Title check
+                    if any(t in title.lower() for t in ["director", "pvc", "dean", "ceo", "chief", "registrar", "head"]):
+                        await asyncio.sleep(1.5)
+                        det = await client.get(url, timeout=TIMEOUT)
+                        job = Job(source=src["name"], title=title, employer=src["name"], url=url, fetched_at=datetime.now(timezone.utc).isoformat())
+                        job.description = BeautifulSoup(det.text, "html.parser").get_text(" ", strip=True)[:4500]
+                        job.employer = extract_employer(title, job.description, src["name"])
                         job.fingerprint = hashlib.sha256(f"{title}{url}".encode()).hexdigest()
                         
                         job = score_job(job, cfg)
@@ -197,17 +214,16 @@ async def process_profile(profile_key: str, weekly: bool):
             except Exception as e:
                 logger.error(f"Error on {src['name']}: {e}")
 
-    recent_jobs = db.get_recent(168 if weekly else 24, cfg["filters"]["minimum_score"])
+    recent = db.get_recent(168 if weekly else 24, cfg["filters"]["minimum_score"])
     fname = f"{cfg['output_prefix']}{'weekly_digest' if weekly else 'new_jobs_report'}.html"
-    generate_html_report(recent_jobs, f"{'Weekly' if weekly else 'Daily'} {cfg['label']} Report", fname)
+    generate_html_report(recent, f"{'Weekly' if weekly else 'Daily'} Leadership Update", fname)
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", choices=["he", "charity", "both"], default="he")
-    parser.add_argument("--weekly", action="store_true")
-    args = parser.parse_args()
-
+    p = argparse.ArgumentParser()
+    p.add_argument("--profile", choices=["he", "charity", "both"], default="he")
+    p.add_argument("--weekly", action="store_true")
+    args = p.parse_args()
     if args.profile == "both":
         asyncio.run(process_profile("he", args.weekly))
         asyncio.run(process_profile("charity", args.weekly))
