@@ -46,7 +46,7 @@ jobs:
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://new_jobs_report.html
-          ignore_missing_files: true
+       
 
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
@@ -91,7 +91,7 @@ jobs:
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://charity_new_jobs_report.html
-          ignore_missing_files: true
+        
 
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
