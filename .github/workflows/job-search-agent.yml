@@ -13,6 +13,12 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      profile:
+        description: 'Which profile to run (he, charity, or both)'
+        required: false
+        default: 'both'
+        type: choice
+        options: ['both', 'he', 'charity']
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -31,14 +37,13 @@ jobs:
 
       - run: pip install -r requirements.txt
 
-      # Determine whether this is a weekly-digest run:
-      # true if it's Friday's scheduled cron OR --weekly was passed via workflow_dispatch
+      # Detect weekly-digest mode
       - name: Set run mode
         id: mode
         run: |
           IS_FRIDAY_CRON="false"
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            DAY=$(date -u +%u)   # 1=Mon … 5=Fri … 7=Sun
+            DAY=$(date -u +%u)
             HOUR=$(date -u +%H)
             [ "$DAY" = "5" ] && [ "$HOUR" = "08" ] && IS_FRIDAY_CRON="true"
           fi
@@ -48,58 +53,103 @@ jobs:
           else
             echo "weekly=false" >> "$GITHUB_OUTPUT"
           fi
+          PROFILE="${{ github.event.inputs.profile }}"
+          echo "profile=${PROFILE:-both}" >> "$GITHUB_OUTPUT"
 
-      # ── Daily scrape ──────────────────────────────────────────────────────────
-      - name: Run daily scrape
-        if: steps.mode.outputs.weekly == 'false'
-        run: python job_search_agent.py
+      # ── HE daily scrape ──────────────────────────────────────────────────────
+      - name: Run HE daily scrape
+        if: steps.mode.outputs.weekly == 'false' && steps.mode.outputs.profile != 'charity'
+        run: python job_search_agent.py --profile he
 
-      - name: Upload daily artifacts
-        if: steps.mode.outputs.weekly == 'false'
-        uses: actions/upload-artifact@v4
-        with:
-          name: latest-job-report
-          path: |
-            latest_report.txt
-            new_jobs_report.txt
-            new_jobs_report.html
-            latest_jobs.csv
-            jobs.db
-
-      - name: Email daily new-jobs report
-        if: steps.mode.outputs.weekly == 'false'
+      - name: Email HE new-jobs report
+        if: steps.mode.outputs.weekly == 'false' && steps.mode.outputs.profile != 'charity'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
           username: charles.knight@gmail.com
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "New Jobs (${{ github.run_started_at }})"
+          subject: "New HE Jobs (${{ github.run_started_at }})"
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://new_jobs_report.html
 
-      # ── Weekly digest (Fridays) ───────────────────────────────────────────────
-      - name: Run weekly digest
-        if: steps.mode.outputs.weekly == 'true'
-        run: python job_search_agent.py --weekly
+      # ── Charity CEO daily scrape ─────────────────────────────────────────────
+      - name: Run Charity CEO daily scrape
+        if: steps.mode.outputs.weekly == 'false' && steps.mode.outputs.profile != 'he'
+        run: python job_search_agent.py --profile charity
 
-      - name: Upload weekly digest artifact
-        if: steps.mode.outputs.weekly == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly-digest
-          path: weekly_digest.html
-
-      - name: Email weekly digest
-        if: steps.mode.outputs.weekly == 'true'
+      - name: Email Charity CEO new-jobs report
+        if: steps.mode.outputs.weekly == 'false' && steps.mode.outputs.profile != 'he'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
           username: charles.knight@gmail.com
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          subject: "Weekly Job Digest — Top 10 this week"
+          subject: "New Charity CEO Jobs (${{ github.run_started_at }})"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          html_body: file://charity_new_jobs_report.html
+
+      # ── Upload all artifacts ─────────────────────────────────────────────────
+      - name: Upload daily artifacts
+        if: steps.mode.outputs.weekly == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-job-reports
+          path: |
+            latest_report.txt
+            new_jobs_report.html
+            latest_jobs.csv
+            jobs_he.db
+            charity_latest_report.txt
+            charity_new_jobs_report.html
+            charity_latest_jobs.csv
+            charity_jobs.db
+
+      # ── HE weekly digest ─────────────────────────────────────────────────────
+      - name: Run HE weekly digest
+        if: steps.mode.outputs.weekly == 'true' && steps.mode.outputs.profile != 'charity'
+        run: python job_search_agent.py --weekly --profile he
+
+      - name: Email HE weekly digest
+        if: steps.mode.outputs.weekly == 'true' && steps.mode.outputs.profile != 'charity'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: charles.knight@gmail.com
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "Weekly HE Digest — Top 10 this week"
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://weekly_digest.html
+
+      # ── Charity CEO weekly digest ────────────────────────────────────────────
+      - name: Run Charity CEO weekly digest
+        if: steps.mode.outputs.weekly == 'true' && steps.mode.outputs.profile != 'he'
+        run: python job_search_agent.py --weekly --profile charity
+
+      - name: Email Charity CEO weekly digest
+        if: steps.mode.outputs.weekly == 'true' && steps.mode.outputs.profile != 'he'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: charles.knight@gmail.com
+          password: ${{ secrets.GMAIL_APP_PASSWORD }}
+          subject: "Weekly Charity CEO Digest — Top 10 this week"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          html_body: file://charity_weekly_digest.html
+
+      # ── Upload weekly artifacts ──────────────────────────────────────────────
+      - name: Upload weekly artifacts
+        if: steps.mode.outputs.weekly == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-digests
+          path: |
+            weekly_digest.html
+            charity_weekly_digest.html
