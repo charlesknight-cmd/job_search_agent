@@ -104,7 +104,84 @@ CONFIG = {
         "salary_90k_plus": 25,
         "salary_below_60k": -10,   # deprioritise known low-salary roles
         "exclude_penalty": -30,
-    }
+    },
+    "db_path": "jobs_he.db",
+    "output_prefix": "",
+    "label": "Higher Education",
+}
+
+
+CHARITY_CONFIG = {
+    "sources": [
+        {"name": "CharityJob", "kind": "generic_html",
+         "url": "https://www.charityjob.co.uk/jobs?keywords=chief+executive+ceo&category=chief-executive"},
+        {"name": "Third Sector Jobs", "kind": "generic_html",
+         "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/"},
+        {"name": "NFP People", "kind": "generic_html",
+         "url": "https://jobs.nfppeople.co.uk/"},
+        {"name": "NCVO Jobs", "kind": "generic_html",
+         "url": "https://jobs.ncvo.org.uk/"},
+        {"name": "ACEVO Jobs", "kind": "generic_html",
+         "url": "https://www.acevo.org.uk/resources/jobs/"},
+        {"name": "Execucare", "kind": "generic_html",
+         "url": "https://www.execucare.com/candidates/current-vacancies/"},
+        {"name": "Prospectus Recruitment", "kind": "generic_html",
+         "url": "https://www.prospectus.co.uk/jobs/"},
+        {"name": "TPP Recruitment", "kind": "generic_html",
+         "url": "https://www.tpp.co.uk/jobs/"},
+        {"name": "Charisma Charity Recruitment", "kind": "generic_html",
+         "url": "https://www.charismarecruitment.co.uk/charity-jobs/"},
+        {"name": "Guardian Jobs (Charities)", "kind": "generic_html",
+         "url": "https://jobs.theguardian.com/jobs/charities/chief-executive/"},
+        {"name": "Odgers Berndtson NFP", "kind": "generic_html",
+         "url": "https://www.odgersberndtson.com/en-gb/search?practice=not-for-profit"},
+        {"name": "GatenbySanderson (Charity)", "kind": "generic_html",
+         "url": "https://www.gatenbysanderson.com/our-roles/?sector=charity-and-social-enterprise"},
+        {"name": "Perrett Laver (NFP)", "kind": "generic_html",
+         "url": "https://plusportal.perrettlaver.com/Search"},
+    ],
+    "filters": {
+        "include_keywords": [
+            "chief executive", "ceo", "executive director", "director general",
+            "charity", "charities", "charitable", "voluntary sector", "third sector",
+            "not-for-profit", "nfp", "ngo", "social enterprise", "civil society",
+            "fundraising", "beneficiaries", "mission-driven", "impact",
+            "trustee", "board", "governance", "strategic leadership",
+            "community", "health", "housing", "arts", "education",
+        ],
+        "exclude_keywords": [
+            "software engineer", "nurse", "warehouse", "sales development",
+            "account executive", "account manager",
+        ],
+        "preferred_locations": ["united kingdom", "remote", "hybrid", "london",
+                                "scotland", "england", "wales"],
+        "minimum_score": 20,   # slightly lower — charity roles less keyword-dense
+    },
+    "weights": {
+        "senior_title": 25,     # CEO/chief exec is a stronger signal here
+        "sector_signal": 20,    # charity/voluntary sector match
+        "governance_signal": 12,
+        "strategy_signal": 10,
+        "digital_signal": 5,
+        "uk_signal": 8,
+        "remote_hybrid_signal": 6,
+        "salary_signal": 5,
+        "salary_60k_plus": 10,
+        "salary_70k_plus": 15,
+        "salary_80k_plus": 20,
+        "salary_90k_plus": 25,
+        "salary_below_60k": -5,   # smaller penalty — many charity roles omit salary
+        "exclude_penalty": -30,
+    },
+    "db_path": "charity_jobs.db",
+    "output_prefix": "charity_",
+    "label": "Charity CEO",
+}
+
+
+PROFILES = {
+    "he": CONFIG,
+    "charity": CHARITY_CONFIG,
 }
 
 
@@ -712,6 +789,22 @@ def score_job(job: Job, config: Dict[str, Any]) -> Job:
         score += weights["digital_signal"]
         matched.append("digital_signal")
 
+    # Charity-specific signals (only fire if these weights are defined in config)
+    if "sector_signal" in weights:
+        sector_terms = ["charity", "charities", "charitable", "voluntary", "third sector",
+                        "not-for-profit", "nfp", "ngo", "social enterprise", "civil society",
+                        "beneficiar", "fundrais"]
+        if any(t in all_text for t in sector_terms):
+            score += weights["sector_signal"]
+            matched.append("sector_signal")
+
+    if "governance_signal" in weights:
+        gov_terms = ["trustee", "board", "governance", "chief executive", "executive director",
+                     "director general"]
+        if any(t in all_text for t in gov_terms):
+            score += weights["governance_signal"]
+            matched.append("governance_signal")
+
     # Specific UK signals only - avoids false matches on "truck", "unique", etc.
     if any(t in all_text for t in [".ac.uk", "united kingdom", "england", "scotland", "wales", "northern ireland"]):
         score += weights["uk_signal"]
@@ -1073,7 +1166,10 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
     total_stored = 0
     new_rows = []
 
-    with Database() as db:
+    db_path = config.get("db_path", DB_PATH)
+    prefix = config.get("output_prefix", "")
+
+    with Database(db_path) as db:
         for src in sources:
             scraper_cls = SCRAPER_MAP.get(src.kind)
             if not scraper_cls:
@@ -1116,18 +1212,19 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
             except Exception as exc:
                 print(f"  Error processing {src.name}: {exc}")
 
+        label = config.get("label", "Jobs")
         # Full report (all-time top jobs)
         all_rows = db.top_jobs(limit=50, minimum_score=minimum_score)
-        full_report = render_report(all_rows, title="Full Job Search Report (All Time Top 50)")
-        save_report(full_report, "latest_report.txt")
-        save_csv(all_rows, "latest_jobs.csv")
+        full_report = render_report(all_rows, title=f"Full {label} Report (All Time Top 50)")
+        save_report(full_report, f"{prefix}latest_report.txt")
+        save_csv(all_rows, f"{prefix}latest_jobs.csv")
 
         # New jobs report (last 25h)
         new_rows = db.new_jobs(hours=25, minimum_score=minimum_score)
-        new_report = render_report(new_rows, title="New Jobs Since Last Run")
-        save_report(new_report, "new_jobs_report.txt")
-        html_report = render_html_report(new_rows, title="New Jobs Since Last Run")
-        save_report(html_report, "new_jobs_report.html")
+        new_report = render_report(new_rows, title=f"New {label} Since Last Run")
+        save_report(new_report, f"{prefix}new_jobs_report.txt")
+        html_report = render_html_report(new_rows, title=f"New {label} Since Last Run")
+        save_report(html_report, f"{prefix}new_jobs_report.html")
 
     print(f"\nTotal fetched: {total_fetched} | Stored: {total_stored} | New this run: {len(new_rows)}")
     return total_stored, len(new_rows)
@@ -1136,11 +1233,13 @@ def run(config: Dict[str, Any] = CONFIG) -> Tuple[int, int]:
 def run_weekly_digest(config: dict = CONFIG) -> int:
     """Generate and save the weekly digest (top 10 from the past 7 days)."""
     minimum_score = config["filters"]["minimum_score"]
-    with Database() as db:
+    db_path = config.get("db_path", DB_PATH)
+    prefix = config.get("output_prefix", "")
+    with Database(db_path) as db:
         rows = db.weekly_jobs(days=7, limit=10, minimum_score=minimum_score)
         html = render_html_digest(rows, config=config)
-        save_report(html, "weekly_digest.html")
-    print(f"Weekly digest: {len(rows)} jobs → weekly_digest.html")
+        save_report(html, f"{prefix}weekly_digest.html")
+    print(f"Weekly digest: {len(rows)} jobs → {prefix}weekly_digest.html")
     return len(rows)
 
 
@@ -1152,11 +1251,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Generate weekly digest instead of running the full scrape",
     )
+    parser.add_argument(
+        "--profile",
+        choices=list(PROFILES.keys()),
+        default="he",
+        help="Which search profile to run (default: he)",
+    )
     args = parser.parse_args()
+    cfg = PROFILES[args.profile]
+    prefix = cfg.get("output_prefix", "")
 
     if args.weekly:
-        run_weekly_digest(CONFIG)
-        print("Artifact written: weekly_digest.html")
+        run_weekly_digest(cfg)
+        print(f"Artifact written: {prefix}weekly_digest.html")
     else:
-        run(CONFIG)
-        print("Artifacts written: latest_report.txt, new_jobs_report.txt, new_jobs_report.html, latest_jobs.csv, jobs.db")
+        run(cfg)
+        print(
+            f"Artifacts written: {prefix}latest_report.txt, "
+            f"{prefix}new_jobs_report.txt, {prefix}new_jobs_report.html, "
+            f"{prefix}latest_jobs.csv, {cfg['db_path']}"
+        )
