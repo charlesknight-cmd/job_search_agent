@@ -19,7 +19,7 @@ jobs:
       - name: Download Previous DB
         uses: dawidd6/action-download-artifact@v3
         with:
-          name: job-databases
+          name: job-databases-he
           if_no_artifact_found: warn
 
       - name: Set up Python
@@ -46,12 +46,11 @@ jobs:
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://new_jobs_report.html
-       
 
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
         with:
-          name: job-databases
+          name: job-databases-he
           path: "*.db"
 
   charity-agent:
@@ -64,7 +63,7 @@ jobs:
       - name: Download Previous DB
         uses: dawidd6/action-download-artifact@v3
         with:
-          name: job-databases
+          name: job-databases-charity
           if_no_artifact_found: warn
 
       - name: Set up Python
@@ -91,11 +90,10 @@ jobs:
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://charity_new_jobs_report.html
-        
 
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
         with:
-          name: job-databases
+          name: job-databases-charity
           path: "*.db"
           overwrite: true
