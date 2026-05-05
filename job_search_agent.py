@@ -202,7 +202,7 @@ async def process_all(profile_name: str, weekly_mode: bool):
                         href = a.get("href", "")
                         if href and len(title) > 5:
                             url = urljoin(src.url, href)
-                            job = Job(source=src.name, source_kind="html", title=title, employer=src.name, url=url, fetched_at=datetime.now(timezone.utc).isoformat())
+                            job = Job(source=src.name, source_kind="html", title=title, employer=src.name, location="UK", url=url, fetched_at=datetime.now(timezone.utc).isoformat())
                             job.fingerprint = hashlib.sha256(f"{title}{url}".encode()).hexdigest()
                             
                             # Check if already seen[cite: 1, 2]
