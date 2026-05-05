@@ -14,7 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 # --- SYSTEM SETTINGS ---
-# Fix for 403 Forbidden: Mimics a standard Chrome browser
+# Fix for 403 Forbidden: Mimics a standard Chrome browser[cite: 1]
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 # Fix for Timeouts: 30 seconds for slow institutional servers[cite: 1]
 TIMEOUT = 30 
@@ -58,11 +58,13 @@ HE_CONFIG = {
     "sources": [
         {"name": "jobs.ac.uk Senior Management", "kind": "generic_html", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
         {"name": "THE UniJobs UK", "kind": "generic_html", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
-        {"name": "Advance HE Careers", "kind": "generic_html", "url": "https://www.advance-he.ac.uk/about-us/work-with-us"},
         {"name": "University of Oxford Careers", "kind": "generic_html", "url": "https://www.jobs.ox.ac.uk/"},
+        {"name": "ULA - University Leadership", "kind": "generic_html", "url": "https://www.ulassociates.co.uk/jobs/"},
+        {"name": "Peridot Partners HE", "kind": "generic_html", "url": "https://www.peridotpartners.co.uk/jobs/"},
+        {"name": "Odgers Berndtson HE", "kind": "generic_html", "url": "https://www.odgersberndtson.com/en-gb/opportunities"},
     ],
     "filters": {
-        "include_keywords": ["education", "higher education", "student success", "dean", "director", "governance"],
+        "include_keywords": ["education", "higher education", "student success", "dean", "director", "governance", "interim", "transformation"],
         "exclude_keywords": ["software engineer", "nurse", "warehouse"],
         "minimum_score": 25,
     },
@@ -79,9 +81,12 @@ CHARITY_CONFIG = {
     "sources": [
         {"name": "CharityJob", "kind": "generic_html", "url": "https://www.charityjob.co.uk/jobs?keywords=chief+executive+ceo&category=chief-executive"},
         {"name": "Third Sector Jobs", "kind": "generic_html", "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/"},
+        {"name": "Prospectus CEO", "kind": "generic_html", "url": "https://www.prospectus.co.uk/jobs/"},
+        {"name": "Charity People", "kind": "generic_html", "url": "https://www.charitypeople.co.uk/jobs"},
+        {"name": "Board Appointments UK", "kind": "generic_html", "url": "https://boardappointments.co.uk/vacancies/"},
     ],
     "filters": {
-        "include_keywords": ["chief executive", "ceo", "executive director", "charity", "impact"],
+        "include_keywords": ["chief executive", "ceo", "executive director", "charity", "impact", "trustee"],
         "exclude_keywords": ["software engineer", "nurse"],
         "minimum_score": 20,
     },
@@ -187,13 +192,11 @@ async def process_all(profile_name: str, weekly_mode: bool):
     
     async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
         with Database(config["db_path"]) as db:
-            # 1. Scrape listing pages
             for src_data in config["sources"]:
                 src = Source(**src_data)
                 try:
                     r = await client.get(src.url, timeout=TIMEOUT)
                     soup = BeautifulSoup(r.text, "html.parser")
-                    # Use smart selectors to find job links[cite: 1]
                     for a in soup.select(src.selector or "a[href]"):
                         title = a.get_text(" ").strip()
                         href = a.get("href", "")
@@ -202,7 +205,7 @@ async def process_all(profile_name: str, weekly_mode: bool):
                             job = Job(source=src.name, source_kind="html", title=title, employer=src.name, url=url, fetched_at=datetime.now(timezone.utc).isoformat())
                             job.fingerprint = hashlib.sha256(f"{title}{url}".encode()).hexdigest()
                             
-                            # Check if we already have this job to save on network calls[cite: 1]
+                            # Check if already seen[cite: 1, 2]
                             if db.find_canonical(title, src.name):
                                 continue
 
@@ -214,7 +217,6 @@ async def process_all(profile_name: str, weekly_mode: bool):
                 except Exception as e:
                     logger.error(f"Error scraping {src.name}: {e}")
 
-            # 2. Generate the specific files expected by GitHub Workflow
             if weekly_mode:
                 jobs = db.get_weekly_top(7, config["filters"]["minimum_score"])
                 fname = f"{config['output_prefix']}weekly_digest.html"
@@ -227,7 +229,7 @@ async def process_all(profile_name: str, weekly_mode: bool):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    # Supports "both" to allow the workflow to trigger everything in one go
+    # Supports "both" for the automated workflow
     p.add_argument("--profile", choices=["he", "charity", "both"], default="he")
     p.add_argument("--weekly", action="store_true")
     args = p.parse_args()
