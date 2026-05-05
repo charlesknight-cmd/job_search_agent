@@ -14,7 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 # --- SYSTEM SETTINGS ---
-# Fix for 403 Forbidden: Mimics a standard Chrome browser[cite: 1]
+# Fix for 403 Forbidden: Mimics a standard Chrome browser
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 # Fix for Timeouts: 30 seconds for slow institutional servers[cite: 1]
 TIMEOUT = 30 
@@ -58,8 +58,8 @@ HE_CONFIG = {
     "sources": [
         {"name": "jobs.ac.uk Senior Management", "kind": "generic_html", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
         {"name": "THE UniJobs UK", "kind": "generic_html", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
-        {"name": "University of Oxford Careers", "kind": "generic_html", "url": "https://www.jobs.ox.ac.uk/"},
         {"name": "Advance HE Careers", "kind": "generic_html", "url": "https://www.advance-he.ac.uk/about-us/work-with-us"},
+        {"name": "University of Oxford Careers", "kind": "generic_html", "url": "https://www.jobs.ox.ac.uk/"},
     ],
     "filters": {
         "include_keywords": ["education", "higher education", "student success", "dean", "director", "governance"],
@@ -155,7 +155,7 @@ def score_job(job: Job, config: Dict) -> Job:
 async def fetch_job_details(client: httpx.AsyncClient, job: Job) -> Job:
     try:
         # Polite delay to prevent rate-limiting[cite: 1]
-        await asyncio.sleep(1.0) 
+        await asyncio.sleep(1.5) 
         r = await client.get(job.url, timeout=TIMEOUT)
         job.description = BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)[:3000]
     except Exception as e:
@@ -167,13 +167,16 @@ def generate_html_report(rows: List[sqlite3.Row], title: str, filename: str):
     cards = []
     for r in rows:
         cards.append(f"""
-            <div style="border:1px solid #ddd; padding:15px; margin-bottom:10px; border-radius:5px;">
-                <h3 style="margin-top:0;">{r['title']}</h3>
+            <div style="border:1px solid #ddd; padding:15px; margin-bottom:10px; border-radius:5px; font-family: sans-serif;">
+                <h3 style="margin-top:0; color: #003366;">{r['title']}</h3>
                 <p><strong>{r['employer']}</strong> | Score: {r['score']}</p>
-                <p>{r['description'][:200]}...</p>
-                <a href="{r['url']}" style="color:#0056b3;">View Job Opening</a>
+                <p style="color: #444;">{r['description'][:250]}...</p>
+                <a href="{r['url']}" style="display: inline-block; padding: 8px 12px; background-color: #0056b3; color: white; text-decoration: none; border-radius: 4px;">View Opening</a>
             </div>""")
-    html = f"<html><body style='font-family:sans-serif;'><h1>{title}</h1>{''.join(cards) if cards else '<p>No new jobs found.</p>'}</body></html>"
+    
+    html_content = "".join(cards) if cards else "<p>No new highly-relevant jobs discovered in this cycle.</p>"
+    html = f"<html><body style='padding: 20px;'><h1>{title}</h1>{html_content}</body></html>"
+    
     with open(filename, "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -190,6 +193,7 @@ async def process_all(profile_name: str, weekly_mode: bool):
                 try:
                     r = await client.get(src.url, timeout=TIMEOUT)
                     soup = BeautifulSoup(r.text, "html.parser")
+                    # Use smart selectors to find job links[cite: 1]
                     for a in soup.select(src.selector or "a[href]"):
                         title = a.get_text(" ").strip()
                         href = a.get("href", "")
@@ -198,6 +202,10 @@ async def process_all(profile_name: str, weekly_mode: bool):
                             job = Job(source=src.name, source_kind="html", title=title, employer=src.name, url=url, fetched_at=datetime.now(timezone.utc).isoformat())
                             job.fingerprint = hashlib.sha256(f"{title}{url}".encode()).hexdigest()
                             
+                            # Check if we already have this job to save on network calls[cite: 1]
+                            if db.find_canonical(title, src.name):
+                                continue
+
                             if prescore_job(job, config) >= PRESCORE_THRESHOLD:
                                 job = await fetch_job_details(client, job)
                                 job = score_job(job, config)
@@ -219,7 +227,13 @@ async def process_all(profile_name: str, weekly_mode: bool):
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
-    p.add_argument("--profile", choices=["he", "charity"], default="he")
+    # Supports "both" to allow the workflow to trigger everything in one go
+    p.add_argument("--profile", choices=["he", "charity", "both"], default="he")
     p.add_argument("--weekly", action="store_true")
     args = p.parse_args()
-    asyncio.run(process_all(args.profile, args.weekly))
+    
+    if args.profile == "both":
+        asyncio.run(process_all("he", args.weekly))
+        asyncio.run(process_all("charity", args.weekly))
+    else:
+        asyncio.run(process_all(args.profile, args.weekly))
