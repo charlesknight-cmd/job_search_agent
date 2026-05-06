@@ -14,6 +14,10 @@ from bs4 import BeautifulSoup
 # --- SYSTEM SETTINGS ---
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 TIMEOUT = 30
+MAX_DESCRIPTION_CHARS = 5000
+REPORT_ROW_LIMIT = 200
+MAX_RETRIES = 2
+RETRY_BACKOFF = 3.0  # seconds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,14 +61,12 @@ HE_CONFIG = {
         "geography_bonus": 20,
         "exclusion_penalty": -60,
     },
-    # Titles that qualify for executive_bonus — specific enough to avoid noise
     "exec_titles": [
         "pro-vice-chancellor", "pvc", "registrar", "principal", "provost",
         "vice-principal", "chief executive", "ceo", "dean", "vice-chancellor",
         "director of education", "director of student", "director of academic",
         "director of quality", "director of learning", "director of teaching",
     ],
-    # Title gate for deciding whether to fetch detail page
     "title_gate": [
         "director", "pvc", "dean", "ceo", "chief", "registrar",
         "head of", "principal", "provost", "vice-chancellor",
@@ -81,10 +83,8 @@ CHARITY_CONFIG = {
     "output_prefix": "charity_",
     "filters": {"minimum_score": 20},
     "sources": [
-        # CEO/executive roles — direct category pages
         {"name": "CharityJob CEO", "url": "https://www.charityjob.co.uk/chief-executive-officer-jobs", "selector": "h3 a"},
         {"name": "CharityJob Director", "url": "https://www.charityjob.co.uk/jobs?keywords=director+of+education+policy+programmes&category=director", "selector": "h3 a"},
-        # Specialist charity exec recruiters
         {"name": "Prospectus", "url": "https://www.prospectus.co.uk/jobs/", "selector": ".job-title a"},
         {"name": "NFP People", "url": "https://careers.nfp-people.co.uk/jobs/", "selector": "a[href*='/job/']"},
         {"name": "NFP Consulting", "url": "https://nfpconsulting.co.uk/jobs", "selector": ".job-title a"},
@@ -93,18 +93,17 @@ CHARITY_CONFIG = {
         {"name": "Third Sector Jobs", "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/", "selector": "h3 a"},
     ],
     "weights": {
-        "executive_bonus": 50,       # CEO/ED/Director General
-        "director_bonus": 30,        # Director of Education/Policy/Programmes
+        "executive_bonus": 50,
+        "director_bonus": 30,
         "permanent_signal": 20,
         "expertise_signal": 15,
-        "sector_fit_bonus": 15,      # Education/social mobility/policy orgs
+        "sector_fit_bonus": 15,
         "exclusion_penalty": -60,
     },
     "exec_titles": [
         "chief executive", "ceo", "executive director", "director general",
         "chief executive officer", "head of organisation", "managing director",
     ],
-    # Broader director titles that suit Charles's background
     "director_titles": [
         "director of education", "director of learning", "director of policy",
         "director of programmes", "director of partnerships", "director of impact",
@@ -124,30 +123,25 @@ CHARITY_CONFIG = {
     ],
 }
 
-# Professional associations, awarding bodies, sector agencies, social enterprises
 SECTOR_BODIES_CONFIG = {
     "label": "Sector Bodies & Professional Associations",
     "db_path": "sector_bodies_jobs.db",
     "output_prefix": "sector_",
     "filters": {"minimum_score": 20},
     "sources": [
-        # jobs.ac.uk catches many professional/sector body roles alongside HE
         {"name": "jobs.ac.uk Professional", "url": "https://www.jobs.ac.uk/search/director", "selector": ".j-search-result__title a"},
-        # CharityJob also lists professional associations and awarding bodies
         {"name": "CharityJob Policy", "url": "https://www.charityjob.co.uk/jobs?keywords=director+policy+education+sector&category=policy-public-affairs", "selector": "h3 a"},
         {"name": "CharityJob Education", "url": "https://www.charityjob.co.uk/jobs?keywords=director+education+learning&category=education", "selector": "h3 a"},
-        # NFP People and Prospectus both cover social enterprises and sector bodies
         {"name": "NFP People", "url": "https://careers.nfp-people.co.uk/jobs/", "selector": "a[href*='/job/']"},
         {"name": "Prospectus", "url": "https://www.prospectus.co.uk/jobs/", "selector": ".job-title a"},
-        # Guardian Jobs covers NDPBs and arms-length bodies well
         {"name": "Guardian Jobs Education", "url": "https://jobs.theguardian.com/jobs/education/senior-executive/", "selector": ".js-job-title a"},
     ],
     "weights": {
-        "executive_bonus": 50,       # CEO/ED/Director General of sector body
-        "director_bonus": 35,        # Director-level at sector body — high relevance
+        "executive_bonus": 50,
+        "director_bonus": 35,
         "permanent_signal": 20,
-        "expertise_signal": 20,      # Higher weight — expertise is the whole proposition
-        "sector_fit_bonus": 20,      # HE/FE/skills/policy organisations
+        "expertise_signal": 20,
+        "sector_fit_bonus": 20,
         "exclusion_penalty": -60,
     },
     "exec_titles": [
@@ -179,12 +173,60 @@ SECTOR_BODIES_CONFIG = {
 PROFILES = {"he": HE_CONFIG, "charity": CHARITY_CONFIG, "sector": SECTOR_BODIES_CONFIG}
 
 
+# --- DESCRIPTION EXTRACTION ---
+def extract_description(html: str) -> str:
+    """
+    Extract meaningful job description text from a detail page.
+    Tries semantic/common job-content containers first, falls back to <body>.
+    Strips nav, header, footer, and script noise before falling back.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    # Remove boilerplate elements unconditionally
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
+        tag.decompose()
+
+    # Ordered list of containers most likely to hold job description content
+    candidate_selectors = [
+        "main",
+        "article",
+        '[class*="job-description"]',
+        '[class*="job-detail"]',
+        '[class*="vacancy-detail"]',
+        '[class*="role-detail"]',
+        '[id*="job-description"]',
+        '[id*="job-detail"]',
+        ".content",
+        "#content",
+    ]
+
+    for sel in candidate_selectors:
+        node = soup.select_one(sel)
+        if node:
+            text = node.get_text(" ", strip=True)
+            if len(text) > 200:  # Ignore containers that matched but are nearly empty
+                return text[:MAX_DESCRIPTION_CHARS]
+
+    # Full-body fallback
+    return soup.get_text(" ", strip=True)[:MAX_DESCRIPTION_CHARS]
+
+
 # --- EMPLOYER EXTRACTION ---
 def extract_employer(title: str, description: str, source_name: str) -> str:
     """
     Try to pull a real employer name from title/description.
     Falls back to source_name only if nothing found.
+    Named sector bodies are matched as literals; institutions via capture groups.
     """
+    # Literal matches for well-known sector bodies (no capture group needed)
+    literal_names = [
+        "Advance HE", "Jisc", "UCAS", "OfS", "QAA", "HESA",
+    ]
+    for name in literal_names:
+        if name.lower() in title.lower() or name.lower() in description[:800].lower():
+            return name
+
+    # Capture-group patterns for institution names
     patterns = [
         r"(University of [A-Z][A-Za-z\s&']+?)(?:\s*[,\|\-]|\s{2}|$)",
         r"([A-Z][A-Za-z\s&']+? University)(?:\s*[,\|\-]|\s{2}|$)",
@@ -192,21 +234,15 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
         r"([A-Z][A-Za-z\s&']+? Institute)(?:\s*[,\|\-]|\s{2}|$)",
         r"([A-Z][A-Za-z\s&']+? Trust)(?:\s*[,\|\-]|\s{2}|$)",
         r"([A-Z][A-Za-z\s&']+? Charity)(?:\s*[,\|\-]|\s{2}|$)",
-        r"Advance HE",
-        r"Jisc",
-        r"UCAS",
-        r"OfS",
-        r"QAA",
-        r"HESA",
     ]
-    # Search title first, then first 800 chars of description
     for text in [title, description[:800]]:
         for p in patterns:
             match = re.search(p, text)
             if match:
-                result = match.group(0).strip().rstrip(",|-").strip()
+                result = match.group(1).strip().rstrip(",|-").strip()
                 if len(result) > 3:
                     return result
+
     return source_name
 
 
@@ -217,17 +253,16 @@ def score_job(job: Job, config: Dict) -> Job:
     job.score = 0.0
     job.match_reasons = []
 
-    # 1. Exclusions first — avoids wasting score on irrelevant roles
+    # 1. Exclusions first
     if any(t in full_text for t in config["exclusion_terms"]):
         job.score += w["exclusion_penalty"]
         job.match_reasons.append("Excluded")
-        return job  # No point scoring further
+        return job
 
     # 2. Executive title
     if any(t in job.title.lower() for t in config["exec_titles"]):
         job.score += w["executive_bonus"]
         job.match_reasons.append("Executive Level")
-    # Director-level titles (charity/sector profiles only)
     elif w.get("director_bonus") and any(t in job.title.lower() for t in config.get("director_titles", [])):
         job.score += w["director_bonus"]
         job.match_reasons.append("Director Level")
@@ -237,14 +272,13 @@ def score_job(job: Job, config: Dict) -> Job:
         job.score += w["permanent_signal"]
         job.match_reasons.append("Permanent")
     elif any(t in full_text for t in ["interim", "fixed-term", "fixed term"]):
-        # Only penalise if not already executive-level
         if "Executive Level" not in job.match_reasons:
             job.score -= 15
             job.match_reasons.append("Short-term Contract")
         else:
             job.match_reasons.append("Strategic Interim")
 
-    # 4. Sector expertise relevant to Charles's background
+    # 4. Sector expertise
     expertise_map = {
         "psf": "PSF",
         "ntfs": "NTFS",
@@ -259,19 +293,18 @@ def score_job(job: Job, config: Dict) -> Job:
         "benchmarking": "Benchmarking",
         "governance": "Governance",
     }
-    for key, label in expertise_map.items():
-        if key in full_text:
-            job.score += w["expertise_signal"]
-            job.match_reasons.append(label)
-            break  # Only award once to avoid stacking
+    matched_expertise = [label for key, label in expertise_map.items() if key in full_text]
+    if matched_expertise:
+        job.score += w["expertise_signal"]
+        job.match_reasons.append(matched_expertise[0])  # Report the first match; score awarded once
 
-    # 5. Geography — Scotland / remote (HE profile only; charity config omits this weight)
+    # 5. Geography (HE profile only)
     if w.get("geography_bonus"):
         if any(t in full_text for t in ["scotland", "edinburgh", "glasgow", "st andrews", "dundee", "aberdeen", "stirling", "remote", "hybrid"]):
             job.score += w["geography_bonus"]
             job.match_reasons.append("Geographic Match")
 
-    # 6. Sector fit — education/policy charities most relevant to Charles's background
+    # 6. Sector fit
     if w.get("sector_fit_bonus"):
         sector_terms = [
             "education charity", "educational charity", "learning charity",
@@ -318,7 +351,6 @@ class Database:
                 status TEXT DEFAULT 'new'
             )
         """)
-        # Non-destructive migrations
         cursor = self.conn.execute("PRAGMA table_info(jobs)")
         cols = [row[1] for row in cursor.fetchall()]
         if "reasons" not in cols:
@@ -341,7 +373,6 @@ class Database:
                 score = excluded.score,
                 reasons = excluded.reasons,
                 fetched_at = excluded.fetched_at
-                -- first_seen_at deliberately NOT updated to preserve original discovery date
         """, (
             job.fingerprint, job.title, job.employer, job.url,
             job.description, job.score, ", ".join(job.match_reasons),
@@ -349,16 +380,39 @@ class Database:
         ))
         self.conn.commit()
 
-    def get_recent(self, hours: int, min_score: float):
+    def get_recent(self, hours: int, min_score: float) -> list:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         return self.conn.execute(
-            "SELECT * FROM jobs WHERE first_seen_at >= ? AND score >= ? ORDER BY score DESC",
-            (cutoff, min_score)
+            "SELECT * FROM jobs WHERE first_seen_at >= ? AND score >= ? ORDER BY score DESC LIMIT ?",
+            (cutoff, min_score, REPORT_ROW_LIMIT)
         ).fetchall()
 
 
+# --- HTTP WITH RETRY ---
+async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> Optional[httpx.Response]:
+    """Fetch a URL with simple retry on transient errors (429, 503, network failures)."""
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = await client.get(url, timeout=TIMEOUT)
+            if resp.status_code in (429, 503) and attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF * (attempt + 1)
+                logger.warning(f"HTTP {resp.status_code} on {url} — retrying in {wait}s")
+                await asyncio.sleep(wait)
+                continue
+            return resp
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            if attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF * (attempt + 1)
+                logger.warning(f"Network error on {url}: {e} — retrying in {wait}s")
+                await asyncio.sleep(wait)
+            else:
+                logger.error(f"Failed after {MAX_RETRIES + 1} attempts: {url}: {e}")
+                return None
+    return None
+
+
 # --- REPORTING ---
-def generate_html_report(rows, title: str, filename: str):
+def generate_html_report(rows: list, title: str, filename: str):
     status_colours = {
         "new": "#e3f2fd",
         "interested": "#e8f5e9",
@@ -434,12 +488,14 @@ async def process_profile(profile_key: str, weekly: bool):
             follow_redirects=True
         ) as client:
             for i, src in enumerate(cfg["sources"]):
-                # Polite delay between source pages
                 if i > 0:
                     await asyncio.sleep(2.0)
                 try:
-                    resp = await client.get(src["url"], timeout=TIMEOUT)
-                    soup = BeautifulSoup(resp.text, "html.parser")
+                    resp = await fetch_with_retry(client, src["url"])
+                    if resp is None:
+                        continue
+
+                    soup = BeautifulSoup(resp.text, "lxml")
 
                     for a in soup.select(src["selector"]):
                         raw_title = a.get_text(" ").strip()
@@ -451,27 +507,22 @@ async def process_profile(profile_key: str, weekly: bool):
                         if db.find_canonical(raw_title, url):
                             continue
 
-                        # Title gate — only fetch detail pages for plausibly senior roles
                         if not any(t in raw_title.lower() for t in cfg["title_gate"]):
                             continue
 
                         await asyncio.sleep(1.5)
-                        try:
-                            det = await client.get(url, timeout=TIMEOUT)
-                        except Exception as e:
-                            logger.warning(f"Detail fetch failed for {url}: {e}")
+                        det = await fetch_with_retry(client, url)
+                        if det is None:
                             continue
 
                         job = Job(
                             source=src["name"],
                             title=raw_title,
-                            employer=src["name"],  # placeholder, overwritten below
+                            employer=src["name"],
                             url=url,
                             fetched_at=datetime.now(timezone.utc).isoformat(),
                         )
-                        job.description = BeautifulSoup(
-                            det.text, "html.parser"
-                        ).get_text(" ", strip=True)[:5000]
+                        job.description = extract_description(det.text)
                         job.employer = extract_employer(raw_title, job.description, src["name"])
                         job.fingerprint = hashlib.sha256(
                             f"{raw_title}{url}".encode()
