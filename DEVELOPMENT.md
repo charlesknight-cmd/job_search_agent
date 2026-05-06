@@ -1,71 +1,84 @@
-# Development Guide for job_search_agent  
+# Development Guide
 
-## Project Structure  
-The `job_search_agent` project follows a modular structure:  
-- `/src`: Contains the main application code.  
-- `/tests`: Holds the unit and integration tests.  
-- `/docs`: Documentation for the project.  
-- `/scripts`: Utility scripts for development and deployment.  
+## Project structure
 
-## Setup  
-1. Clone the repository:  
-   ```bash  
-   git clone https://github.com/charlesknight-cmd/job_search_agent.git  
-   ```  
-2. Navigate to the project directory:  
-   ```bash  
-   cd job_search_agent  
-   ```  
-3. Install dependencies:  
-   ```bash  
-   pip install -r requirements.txt  
-   ```  
+This is a single-file Python application:
 
-## Code Quality Checks  
-- Use `flake8` for linting:  
-   ```bash  
-   flake8 src/  
-   ```  
-- Run unit tests to ensure code quality:  
-   ```bash  
-   pytest tests/  
-   ```  
+- `job_search_agent.py` — scraping, scoring, deduplication, and report generation
+- `requirements.txt` — runtime dependencies
+- `.github/workflows/job-search-agent.yml` — daily/weekly schedule and email delivery
+- `CLAUDE.md` — project instructions and architecture overview
 
-## Components  
-- **Main Engine**: Handles the core job searching logic.  
-- **Data Ingestion**: Sources data from various APIs and databases.  
-- **User Interface**: Interaction layer for users, can be a CLI or web-based.  
+There are no `src/`, `tests/`, or `docs/` directories at the moment.
 
-## Adding New Sources  
-1. Create a new module in `/src/sources`.  
-2. Implement the integration logic for the new source.  
-3. Update the data ingestion component to include your new module.  
+## Setup
 
-## Testing Guidelines  
-- Write unit tests for all new features.  
-- Maintain a high code coverage (aim for 80%).  
-- Use mocks where appropriate to isolate tests.  
+```bash
+git clone https://github.com/charlesknight-cmd/job_search_agent.git
+cd job_search_agent
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-## Performance Optimization  
-- Profile the application using `cProfile` to identify bottlenecks.  
-- Use caching for expensive operations to reduce response times.  
-- Optimize database queries for faster retrieval.  
+Python 3.11 is the supported version (matches the GitHub Actions workflow).
 
-## Deployment  
-1. Ensure all tests pass before deployment.  
-2. Use Docker for containerization.  
-   ```bash  
-   docker build -t job_search_agent .  
-   ```  
-3. Deploy to the cloud provider of your choice (e.g., AWS, Azure).  
+## Running locally
 
-## Troubleshooting  
-- If you encounter issues, check the logs for errors:  
-   ```bash  
-   tail -f logs/application.log  
-   ```  
-- Confirm that all environment variables are set correctly.  
-- If problems persist, consult the documentation or seek help from the community.  
+```bash
+python job_search_agent.py --profile he         # daily HE leadership report
+python job_search_agent.py --profile charity    # daily charity CEO/director report
+python job_search_agent.py --profile sector     # daily sector bodies report
+python job_search_agent.py --profile all        # all three profiles in sequence
+python job_search_agent.py --profile he --weekly  # 7-day digest
+```
 
----  
-This guide should help new developers get started and contribute effectively to the `job_search_agent` project.
+Outputs land in the working directory:
+
+- `new_jobs_report.html` (HE) / `charity_new_jobs_report.html` / `sector_new_jobs_report.html`
+- `jobs_he.db` / `charity_jobs.db` / `sector_bodies_jobs.db`
+- `job_search.log`
+
+## Code quality
+
+Optional pre-commit hooks (Black, Flake8, basic hygiene) are configured in
+`.pre-commit-config.yaml`:
+
+```bash
+pip install pre-commit
+pre-commit install        # run on every commit
+pre-commit run --all-files
+```
+
+There is no test suite at present. If you add one, place tests under `tests/`
+and wire `pytest` into the workflow.
+
+## Adding a new source
+
+Sources are defined inside the relevant `*_CONFIG` dict in `job_search_agent.py`:
+
+```python
+{"name": "Source Name", "url": "https://...", "selector": "css selector"}
+```
+
+When adding one, leave a comment explaining why the selector was chosen so
+future maintainers can revalidate when the page structure shifts.
+
+## Deployment
+
+The agent is deployed via GitHub Actions on a cron schedule — there is no
+container or external host. See `.github/workflows/job-search-agent.yml`.
+Required repository secrets:
+
+- `MAIL_USERNAME` — Gmail address used to send the report
+- `MAIL_PASSWORD` — Gmail app password (not the account password)
+
+## Troubleshooting
+
+- Selector returned 0 rows: open the source URL in a browser and re-check the
+  selector against the current HTML. Some boards (e.g. Odgers Berndtson) render
+  vacancies via JavaScript and cannot be scraped this way.
+- Empty report: jobs are being filtered. Lower `minimum_score` in the relevant
+  `_CONFIG` to inspect what's being discarded.
+- Database not persisting in CI: confirm the `actions/upload-artifact` step ran
+  and the artefact name matches the `dawidd6/action-download-artifact` step in
+  the next run.

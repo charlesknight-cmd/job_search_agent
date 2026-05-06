@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Generated reports and state
+*.db
+*.html
+job_search.log
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
