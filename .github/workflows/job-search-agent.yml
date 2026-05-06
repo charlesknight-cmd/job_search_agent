@@ -2,8 +2,15 @@ name: Job Search Agent
 
 on:
   schedule:
-    - cron: '0 9 * * *' # Runs daily at 9 AM
+    - cron: '0 9 * * *'     # Daily at 9 AM — 24-hour report
+    - cron: '0 8 * * 1'     # Monday at 8 AM — weekly digest
   workflow_dispatch:
+    inputs:
+      weekly:
+        description: 'Generate weekly digest instead of daily report'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -32,7 +39,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run HE Agent
-        run: python job_search_agent.py --profile he
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 8 * * 1" ] || [ "${{ inputs.weekly }}" = "true" ]; then
+            python job_search_agent.py --profile he --weekly
+          else
+            python job_search_agent.py --profile he
+          fi
 
       - name: Send HE Email
         if: success()
@@ -52,6 +64,7 @@ jobs:
         with:
           name: job-databases-he
           path: "*.db"
+          overwrite: true
 
   charity-agent:
     name: Charity CEO Agent
@@ -76,7 +89,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Charity Agent
-        run: python job_search_agent.py --profile charity
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 8 * * 1" ] || [ "${{ inputs.weekly }}" = "true" ]; then
+            python job_search_agent.py --profile charity --weekly
+          else
+            python job_search_agent.py --profile charity
+          fi
 
       - name: Send Charity Email
         if: success()
@@ -95,5 +113,55 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: job-databases-charity
+          path: "*.db"
+          overwrite: true
+
+  sector-agent:
+    name: Sector Bodies Agent
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Previous DB
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: job-databases-sector
+          if_no_artifact_found: warn
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Sector Agent
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 8 * * 1" ] || [ "${{ inputs.weekly }}" = "true" ]; then
+            python job_search_agent.py --profile sector --weekly
+          else
+            python job_search_agent.py --profile sector
+          fi
+
+      - name: Send Sector Email
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "HE Perform: Sector Bodies Update"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          html_body: file://sector_new_jobs_report.html
+
+      - name: Upload Updated DB
+        uses: actions/upload-artifact@v4
+        with:
+          name: job-databases-sector
           path: "*.db"
           overwrite: true
