@@ -1,12 +1,14 @@
 import asyncio
 import hashlib
+import html
 import logging
+import random
 import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -268,15 +270,16 @@ def score_job(job: Job, config: Dict) -> Job:
         job.match_reasons.append("Director Level")
 
     # 3. Permanent vs interim
+    senior_match = "Executive Level" in job.match_reasons or "Director Level" in job.match_reasons
     if "permanent" in full_text or "substantive" in full_text:
         job.score += w["permanent_signal"]
         job.match_reasons.append("Permanent")
     elif any(t in full_text for t in ["interim", "fixed-term", "fixed term"]):
-        if "Executive Level" not in job.match_reasons:
+        if senior_match:
+            job.match_reasons.append("Strategic Interim")
+        else:
             job.score -= 15
             job.match_reasons.append("Short-term Contract")
-        else:
-            job.match_reasons.append("Strategic Interim")
 
     # 4. Sector expertise
     expertise_map = {
@@ -390,20 +393,28 @@ class Database:
 
 # --- HTTP WITH RETRY ---
 async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> Optional[httpx.Response]:
-    """Fetch a URL with simple retry on transient errors (429, 503, network failures)."""
+    """Fetch a URL with simple retry on transient errors (429, 503, network failures).
+
+    Returns the response only if the status is 2xx. 4xx (other than 429) is treated as a
+    permanent failure and returns None — the caller should not parse a 404 page as content.
+    """
     for attempt in range(MAX_RETRIES + 1):
         try:
             resp = await client.get(url, timeout=TIMEOUT)
             if resp.status_code in (429, 503) and attempt < MAX_RETRIES:
-                wait = RETRY_BACKOFF * (attempt + 1)
-                logger.warning(f"HTTP {resp.status_code} on {url} — retrying in {wait}s")
+                # Backoff with jitter to avoid thundering-herd retries against rate limiters
+                wait = RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
+                logger.warning(f"HTTP {resp.status_code} on {url} — retrying in {wait:.1f}s")
                 await asyncio.sleep(wait)
                 continue
-            return resp
+            if 200 <= resp.status_code < 300:
+                return resp
+            logger.warning(f"HTTP {resp.status_code} on {url} — skipping")
+            return None
         except (httpx.TimeoutException, httpx.NetworkError) as e:
             if attempt < MAX_RETRIES:
-                wait = RETRY_BACKOFF * (attempt + 1)
-                logger.warning(f"Network error on {url}: {e} — retrying in {wait}s")
+                wait = RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
+                logger.warning(f"Network error on {url}: {e} — retrying in {wait:.1f}s")
                 await asyncio.sleep(wait)
             else:
                 logger.error(f"Failed after {MAX_RETRIES + 1} attempts: {url}: {e}")
@@ -427,34 +438,43 @@ def generate_html_report(rows: list, title: str, filename: str):
         reasons_html = " ".join(
             f"<span style='background:#e3f2fd; padding:3px 8px; border-radius:4px; "
             f"margin-right:5px; border:1px solid #90caf9; font-size:0.8em; color:#0d47a1;'>"
-            f"{res.strip()}</span>"
+            f"{html.escape(res.strip())}</span>"
             for res in (r["reasons"] or "").split(",") if res.strip()
         )
+
+        url = r["url"] or ""
+        # Only allow http(s) URLs in the View Opening link to prevent javascript: injection
+        scheme = urlparse(url).scheme.lower()
+        safe_url = html.escape(url, quote=True) if scheme in ("http", "https") else "#"
+
+        description_excerpt = (r["description"] or "")[:400]
+        ellipsis = "..." if description_excerpt else ""
+
         cards.append(f"""
             <div style="border:1px solid #e0e0e0; padding:20px; margin-bottom:20px;
                         border-radius:12px; background:{status_bg};
                         box-shadow:0 2px 4px rgba(0,0,0,0.05); font-family:sans-serif;">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <h3 style="margin:0 0 6px 0; color:#1a237e;">{r['title']}</h3>
+                    <h3 style="margin:0 0 6px 0; color:#1a237e;">{html.escape(r['title'] or '')}</h3>
                     <span style="font-size:0.8em; background:#1a237e; color:white;
                                  padding:3px 8px; border-radius:4px; white-space:nowrap;">
                         Score: {r['score']}
                     </span>
                 </div>
-                <p style="margin:0 0 10px 0;"><strong>{r['employer']}</strong></p>
+                <p style="margin:0 0 10px 0;"><strong>{html.escape(r['employer'] or '')}</strong></p>
                 <div style="margin-bottom:12px;">{reasons_html}</div>
                 <p style="color:#424242; font-size:0.9em; line-height:1.5; margin-bottom:15px;">
-                    {(r['description'] or '')[:400]}...
+                    {html.escape(description_excerpt)}{ellipsis}
                 </p>
                 <div style="display:flex; gap:10px; align-items:center;">
-                    <a href="{r['url']}" target="_blank"
+                    <a href="{safe_url}" target="_blank" rel="noopener noreferrer"
                        style="background:#1a237e; color:white; padding:10px 20px;
                               text-decoration:none; border-radius:6px; font-weight:bold;">
                         View Opening
                     </a>
                     <span style="font-size:0.8em; color:#666;">
-                        First seen: {(r['first_seen_at'] or '')[:10]}
-                        &nbsp;|&nbsp; Status: <strong>{status}</strong>
+                        First seen: {html.escape((r['first_seen_at'] or '')[:10])}
+                        &nbsp;|&nbsp; Status: <strong>{html.escape(status)}</strong>
                     </span>
                 </div>
             </div>""")
@@ -462,13 +482,14 @@ def generate_html_report(rows: list, title: str, filename: str):
     content = "".join(cards) if cards else (
         "<p style='font-family:sans-serif;'>No opportunities met the suitability threshold.</p>"
     )
+    safe_title = html.escape(title)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"""<html>
-<head><meta charset="utf-8"><title>{title}</title></head>
+<head><meta charset="utf-8"><title>{safe_title}</title></head>
 <body style='max-width:860px; margin:auto; padding:40px; background:#f8f9fa;'>
     <h2 style='font-family:sans-serif; color:#1a237e;
                border-bottom:2px solid #1a237e; padding-bottom:10px;'>
-        {title}
+        {safe_title}
     </h2>
     <p style='font-family:sans-serif; color:#666; font-size:0.9em;'>
         Generated: {datetime.now().strftime('%d %B %Y %H:%M')}
