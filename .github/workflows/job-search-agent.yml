@@ -2,7 +2,7 @@ name: Job Search Agent
 
 on:
   schedule:
-    - cron: '0 9 * * *'     # Daily at 9 AM — 24-hour report
+    - cron: '15 9 * * *'    # Daily at 09:15 UTC — off the contended top-of-hour slot
     - cron: '0 8 * * 1'     # Monday at 8 AM — weekly digest
   workflow_dispatch:
     inputs:
@@ -59,6 +59,23 @@ jobs:
           from: charles.knight@gmail.com
           html_body: file://new_jobs_report.html
 
+      - name: Notify on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "❌ HE Perform: HE Agent FAILED"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          body: |
+            The HE job search agent failed.
+            Workflow: ${{ github.workflow }}
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit: ${{ github.sha }}
+
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
         with:
@@ -109,6 +126,23 @@ jobs:
           from: charles.knight@gmail.com
           html_body: file://charity_new_jobs_report.html
 
+      - name: Notify on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "❌ HE Perform: Charity Agent FAILED"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          body: |
+            The Charity job search agent failed.
+            Workflow: ${{ github.workflow }}
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit: ${{ github.sha }}
+
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
         with:
@@ -158,6 +192,23 @@ jobs:
           to: charles.knight@gmail.com
           from: charles.knight@gmail.com
           html_body: file://sector_new_jobs_report.html
+
+      - name: Notify on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "❌ HE Perform: Sector Agent FAILED"
+          to: charles.knight@gmail.com
+          from: charles.knight@gmail.com
+          body: |
+            The Sector job search agent failed.
+            Workflow: ${{ github.workflow }}
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit: ${{ github.sha }}
 
       - name: Upload Updated DB
         uses: actions/upload-artifact@v4
