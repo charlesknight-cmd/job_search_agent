@@ -10,11 +10,13 @@ Owner: Charles Knight (charles.knight@gmail.com)
 
 ## Three search profiles
 
-| Profile | Target roles | Config | Output |
+| Profile | Target roles | Profile file | Output |
 |---|---|---|---|
-| `he` | HE senior leadership (PVC, Dean, Registrar, Director) | `HE_CONFIG` | `new_jobs_report.html` |
-| `charity` | Charity CEO and Director roles | `CHARITY_CONFIG` | `charity_new_jobs_report.html` |
-| `sector` | Sector bodies and professional associations | `SECTOR_BODIES_CONFIG` | `sector_new_jobs_report.html` |
+| `he` | HE senior leadership (PVC, Dean, Registrar, Director) | `profiles/he.yaml` | `new_jobs_report.html` |
+| `charity` | Charity CEO and Director roles | `profiles/charity.yaml` | `charity_new_jobs_report.html` |
+| `sector` | Sector bodies and professional associations | `profiles/sector.yaml` | `sector_new_jobs_report.html` |
+
+Profiles are loaded from YAML at startup by `load_profile()` in `job_search_agent.py`. Required keys: `label`, `db_path`, `output_prefix`, `filters`, `sources`, `weights`, `exec_titles`, `title_gate`, `exclusion_terms`. Missing keys fail fast at load time.
 
 ---
 
@@ -26,44 +28,60 @@ python job_search_agent.py --profile he
 python job_search_agent.py --profile charity
 python job_search_agent.py --profile sector
 
-# Weekly digest
+# All profiles in sequence
+python job_search_agent.py --profile all
+
+# Weekly digest (7-day window instead of 24h)
 python job_search_agent.py --profile he --weekly
+
+# Dry run — scrape and score, but no DB writes and no report
+python job_search_agent.py --profile he --dry-run
 ```
 
 ---
 
 ## Architecture
 
-1. **Scrape** — async HTTP requests (httpx) to job board listing pages; CSS selectors extract job title links
-2. **Fetch descriptions** — follow each job URL to get full description text
-3. **Score** — rule-based relevance scoring using title matching, keyword signals, and exclusion penalties
-4. **Deduplicate** — SQLite database per profile stores job fingerprints; only new jobs appear in reports
-5. **Report** — HTML email report generated and sent via Gmail SMTP
+1. **Load profile** — YAML config from `profiles/<name>.yaml` (validated against `REQUIRED_PROFILE_KEYS`)
+2. **Scrape** — async HTTP requests (httpx) to job board listing pages with retry/backoff; CSS selectors extract job title links
+3. **Fetch descriptions** — follow each job URL to get full description text (skipping URLs already in the DB)
+4. **Score** — rule-based relevance scoring using title matching, keyword signals, and exclusion penalties
+5. **Deduplicate** — SQLite database per profile stores job fingerprints; only new jobs appear in reports. URLs already known are touched (`last_seen_at` updated) so stale-marking can detect when a listing actually disappears.
+6. **Stale-mark** — jobs not seen for `STALE_AFTER_HOURS` (default 168h) are marked `status = 'stale'`
+7. **Report** — HTML email report generated and sent via Gmail SMTP
 
 ---
 
 ## Scoring logic
 
-Each job gets a float score. Jobs below `minimum_score` are filtered out.
+Each job gets a float score. Jobs below `minimum_score` (in the profile's `filters` block) are filtered out.
 
-Signals (weights vary by profile — see config):
-- `executive_bonus` — title matches exec_titles list
-- `director_bonus` (charity/sector only) — title matches director_titles list
-- `permanent_signal` — description suggests permanent role
-- `expertise_signal` — description matches domain expertise keywords
-- `sector_fit_bonus` (charity/sector) — content matches sector context
-- `geography_bonus` (HE only) — UK geography signals
-- `exclusion_penalty` — title/description matches exclusion_terms (hard negative)
+Signals (weights vary by profile — see each profile's `weights` block):
+- `executive_bonus` — title matches `exec_titles` list
+- `director_bonus` (charity/sector only) — title matches `director_titles` list
+- `permanent_signal` — description suggests permanent role (word-boundary match on `permanent`/`substantive`, so `non-permanent` does **not** trip it)
+- `expertise_signal` — description matches domain expertise keywords (PSF, NTFS, TEF, REF, accreditation, governance, AI in education, etc.)
+- `sector_fit_bonus` (charity/sector) — content matches sector context (education charity, social mobility, widening participation, etc.)
+- `geography_bonus` (HE only) — UK geography signals (Scotland, remote, hybrid, etc.)
+- `exclusion_penalty` — title/description matches `exclusion_terms` (hard negative; short-circuits scoring)
 
-Title gate: jobs whose title doesn't contain any `title_gate` term are dropped before scoring.
+Title gate: jobs whose title doesn't contain any `title_gate` term are dropped before description fetch.
+
+Senior+interim handling: if a senior title is matched and the description suggests interim/fixed-term, the job is tagged "Strategic Interim" rather than penalised.
+
+---
+
+## HTTP retry behaviour
+
+`fetch_with_retry` retries on `429`, `503`, and network errors. It honours the `Retry-After` header (delta-seconds form only) capped at `RETRY_AFTER_CAP` (60s). Other 4xx responses are treated as permanent failures and return `None` — so the caller never parses a 404 page as content.
 
 ---
 
 ## GitHub Actions schedule
 
-- Daily at 9 AM UTC — standard report
-- Monday at 8 AM UTC — weekly digest (includes older jobs)
-- Manual trigger available via `workflow_dispatch`
+- Daily at 09:15 UTC — standard report (off the contended top-of-hour slot)
+- Monday at 08:00 UTC — weekly digest (7-day window)
+- Manual trigger available via `workflow_dispatch` (with optional `weekly` input)
 
 Three parallel jobs run independently: `he-agent`, `charity-agent`, `sector-agent`.
 
@@ -82,13 +100,32 @@ Databases persist between runs via GitHub Actions artifacts (`job-databases-he`,
 
 ## Dependencies
 
+Runtime (`requirements.txt`):
+
 ```
-httpx
-beautifulsoup4
-lxml
+httpx>=0.27,<0.29
+beautifulsoup4>=4.12,<5.0
+lxml>=5.0,<6.0
+PyYAML>=6.0,<7.0
 ```
 
-Install: `pip install -r requirements.txt`
+Dev/test (`requirements-dev.txt`): adds `pytest` and `pre-commit`.
+
+Install: `pip install -r requirements.txt` (or `-r requirements-dev.txt` for the test suite).
+
+---
+
+## Tests
+
+Tests live under `tests/` and use stdlib `unittest` (so they also run under `pytest`):
+
+```bash
+python -m unittest discover -s tests -v
+# or
+pytest
+```
+
+Coverage focus: `score_job` (including the regression test for the `non-permanent` false-positive), `extract_employer`, and `_parse_retry_after`. When changing scoring logic, add a test case here first.
 
 ---
 
@@ -97,7 +134,7 @@ Install: `pip install -r requirements.txt`
 - Odgers Berndtson excluded — vacancies are JavaScript-rendered, not in HTML source
 - Perrett Laver selector targets vacancy links by href pattern — verify on first run
 - Some job boards may change their HTML structure without notice, breaking selectors
-- No retry on selector failure — if a source returns 0 results it fails silently
+- `Retry-After` HTTP-date form is intentionally not supported (clock-skew not worth the complexity)
 
 ---
 
@@ -107,5 +144,7 @@ Install: `pip install -r requirements.txt`
 - Async scraping via `httpx` and `asyncio`
 - SQLite for deduplication state (one `.db` file per profile)
 - No external APIs — all scraping is HTML parsing via BeautifulSoup
+- Search parameters live in YAML under `profiles/`; non-Python users can edit them without touching code
 - Keep scoring logic transparent and rule-based — no ML
-- When adding new sources, add a comment explaining why the selector was chosen
+- When adding a new source, leave a comment in the YAML explaining why the selector was chosen so future maintainers can revalidate when the page structure shifts
+- Pre-commit hooks (Black, Flake8, basic hygiene) configured in `.pre-commit-config.yaml`

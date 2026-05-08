@@ -2,14 +2,14 @@
 
 ## Project structure
 
-This is a single-file Python application:
-
 - `job_search_agent.py` — scraping, scoring, deduplication, and report generation
+- `profiles/` — per-profile YAML config (`he.yaml`, `charity.yaml`, `sector.yaml`)
+- `tests/` — `unittest`-based tests (also runnable under pytest)
 - `requirements.txt` — runtime dependencies
+- `requirements-dev.txt` — adds pytest and pre-commit
 - `.github/workflows/job-search-agent.yml` — daily/weekly schedule and email delivery
+- `.pre-commit-config.yaml` — formatting and lint hooks
 - `CLAUDE.md` — project instructions and architecture overview
-
-There are no `src/`, `tests/`, or `docs/` directories at the moment.
 
 ## Setup
 
@@ -70,14 +70,18 @@ first so the behaviour is captured.
 
 ## Adding a new source
 
-Sources are defined inside the relevant `*_CONFIG` dict in `job_search_agent.py`:
+Sources are defined under `sources:` in the relevant profile YAML
+(`profiles/he.yaml`, `profiles/charity.yaml`, or `profiles/sector.yaml`):
 
-```python
-{"name": "Source Name", "url": "https://...", "selector": "css selector"}
+```yaml
+sources:
+  - name: Source Name
+    url: https://...
+    selector: "css selector"
 ```
 
-When adding one, leave a comment explaining why the selector was chosen so
-future maintainers can revalidate when the page structure shifts.
+When adding one, leave a YAML comment explaining why the selector was chosen
+so future maintainers can revalidate when the page structure shifts.
 
 ## Deployment
 
