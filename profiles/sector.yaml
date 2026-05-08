@@ -48,6 +48,7 @@ director_titles:
   - director of policy
   - director of quality
   - director of standards
+  - director of professional standards
   - director of accreditation
   - director of programmes
   - director of partnerships
@@ -58,6 +59,14 @@ director_titles:
   - director of assessment
   - director of research
   - director of membership
+  - director of skills
+  - director of credentials
+  - director of workforce
+  - director of professional development
+  - director of innovation
+  - director of knowledge
+  - director of leadership
+  - director of leadership development
   - head of education
   - head of policy
   - head of quality
@@ -66,6 +75,10 @@ director_titles:
   - head of accreditation
   - head of partnerships
   - head of programmes
+  - head of skills
+  - head of professional development
+  - head of credentials
+  - head of membership
 
 title_gate:
   - chief executive

@@ -35,6 +35,21 @@ class TestExclusionGate(unittest.TestCase):
         self.assertEqual(job.score, HE_CONFIG["weights"]["exclusion_penalty"])
         self.assertIn("Excluded", job.match_reasons)
 
+    def test_edtech_director_not_excluded_by_software_mention(self):
+        # Regression: the bare "software" exclusion previously killed any
+        # legitimate EdTech leadership role whose description mentioned
+        # software. Director-of-Digital-Learning roles should now score.
+        job = score_job(
+            _make_job(
+                "Director of Digital Learning",
+                "Permanent senior role leading our learning platform "
+                "and educational software strategy across the institution",
+            ),
+            HE_CONFIG,
+        )
+        self.assertNotIn("Excluded", job.match_reasons)
+        self.assertGreater(job.score, HE_CONFIG["filters"]["minimum_score"])
+
     def test_no_exclusion_does_not_short_circuit(self):
         job = score_job(
             _make_job(
@@ -113,6 +128,89 @@ class TestExecutiveBonus(unittest.TestCase):
             CHARITY_CONFIG,
         )
         self.assertIn("Director Level", job.match_reasons)
+
+    def test_director_bonus_for_he(self):
+        # HE profile previously had no director_bonus, so adjacent senior
+        # titles like "Director of Innovation" only scored on permanent/
+        # expertise signals and could fall under the 25-point threshold.
+        # Note: titles like "Director of Student Experience" already match
+        # the exec_titles substring "director of student" and earn the
+        # bigger Executive Level bonus — director_titles catches the gap
+        # for *adjacent* roles (innovation, knowledge exchange, etc.).
+        job = score_job(
+            _make_job(
+                "Director of Innovation",
+                "Permanent senior leadership role driving knowledge "
+                "exchange and enterprise activity across the institution",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Director Level", job.match_reasons)
+        self.assertNotIn("Executive Level", job.match_reasons)
+        self.assertGreaterEqual(
+            job.score, HE_CONFIG["weights"]["director_bonus"]
+        )
+
+
+class TestExpertiseSignals(unittest.TestCase):
+    """CV-derived expertise terms should trigger the expertise bonus."""
+
+    def _scored(self, description: str, config=HE_CONFIG):
+        return score_job(
+            _make_job("Director of Education", description), config
+        )
+
+    def test_micro_credentials_signal(self):
+        job = self._scored(
+            "Designing micro-credentials and stackable qualifications "
+            "for the international market"
+        )
+        self.assertIn("Micro-credentials", job.match_reasons)
+
+    def test_student_outcomes_signal(self):
+        job = self._scored(
+            "Improving student outcomes and graduate outcomes through "
+            "evidence-based learning analytics"
+        )
+        # First match wins for the reported reason; just assert a CV-relevant
+        # expertise tag landed.
+        cv_tags = {
+            "Student Outcomes",
+            "Graduate Outcomes",
+            "Learning Analytics",
+        }
+        self.assertTrue(cv_tags & set(job.match_reasons))
+
+    def test_tne_signal_does_not_false_positive_on_witness(self):
+        # The literal substring "tne" appears inside "witness" / "fitness".
+        # Word-boundary spacing in the expertise_map should avoid this.
+        job = self._scored(
+            "Fitness for purpose review with a witness statement on file"
+        )
+        self.assertNotIn("TNE", job.match_reasons)
+
+    def test_tne_signal_when_actually_present(self):
+        job = self._scored(
+            "Leading our transnational education (TNE) partnerships "
+            "across MENA and APAC"
+        )
+        self.assertIn("TNE", job.match_reasons)
+
+    def test_ofs_signal_does_not_false_positive_on_ofsted(self):
+        # "ofsted" contains the literal substring "ofs" — without spacing
+        # guards, every FE/schools-adjacent role mentioning Ofsted would
+        # falsely trip the OfS expertise signal.
+        job = self._scored(
+            "Working alongside Ofsted on inspection-readiness improvements"
+        )
+        self.assertNotIn("OfS", job.match_reasons)
+
+    def test_ofs_signal_when_actually_present(self):
+        job = self._scored(
+            "Engagement with the Office for Students and OfS B3 metrics"
+        )
+        match_reasons = set(job.match_reasons)
+        self.assertTrue({"OfS", "B3 Metrics"} & match_reasons)
 
 
 class TestTitleGateAndScoring(unittest.TestCase):

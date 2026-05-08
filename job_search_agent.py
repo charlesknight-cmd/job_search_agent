@@ -210,6 +210,10 @@ def score_job(job: Job, config: Dict) -> Job:
             job.match_reasons.append("Short-term Contract")
 
     # 4. Sector expertise
+    # Keys are matched as substrings against ``full_text`` (lowercased title +
+    # description). Short acronyms are wrapped in spaces to avoid matching
+    # inside unrelated words (e.g. " ofs " not "ofs", to keep "officers"
+    # / "offset" out; " tne " not "tne", to keep "witness" / "fitness" out).
     expertise_map = {
         "psf": "PSF",
         "ntfs": "NTFS",
@@ -223,6 +227,44 @@ def score_job(job: Job, config: Dict) -> Job:
         "artificial intelligence": "AI Signal",
         "benchmarking": "Benchmarking",
         "governance": "Governance",
+        # CV-derived expertise signals — Charles's track record sits heavily
+        # in student outcomes, micro-credentials, TNE, EdTech, leadership
+        # development, and sector-policy work. Without these signals, HE
+        # roles in those areas were quietly scoring under the threshold.
+        "student experience": "Student Experience",
+        "student success": "Student Success",
+        "student outcomes": "Student Outcomes",
+        "learning analytics": "Learning Analytics",
+        "micro-credential": "Micro-credentials",
+        "microcredential": "Micro-credentials",
+        "stackable": "Stackable Qualifications",
+        "transnational": "TNE",
+        " tne ": "TNE",
+        "widening participation": "Widening Participation",
+        "access and participation": "Widening Participation",
+        " ofs ": "OfS",
+        "office for students": "OfS",
+        "b3 metric": "B3 Metrics",
+        " b3 ": "B3 Metrics",
+        "leadership development": "Leadership Development",
+        "professional development": "Professional Development",
+        "aurora": "Aurora",
+        "athena swan": "Athena Swan",
+        "edtech": "EdTech",
+        "ed tech": "EdTech",
+        "digital learning": "Digital Learning",
+        "online learning": "Digital Learning",
+        "learning gain": "Learning Gain",
+        "employability": "Employability",
+        "graduate outcomes": "Graduate Outcomes",
+        "portfolio review": "Portfolio Review",
+        "validation panel": "Validation",
+        "lifelong learning": "Lifelong Learning",
+        "knowledge exchange": "Knowledge Exchange",
+        "edi ": "EDI",
+        " edi,": "EDI",
+        "equality, diversity": "EDI",
+        "equality diversity": "EDI",
     }
     matched_expertise = [label for key, label in expertise_map.items() if key in full_text]
     if matched_expertise:

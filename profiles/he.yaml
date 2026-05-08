@@ -23,6 +23,7 @@ sources:
 
 weights:
   executive_bonus: 50
+  director_bonus: 30
   permanent_signal: 25
   expertise_signal: 20
   geography_bonus: 20
@@ -46,6 +47,34 @@ exec_titles:
   - director of learning
   - director of teaching
 
+# Adjacent senior HE titles that don't quite fit exec_titles but should still
+# score: faculty leadership (Associate/Pro-Dean) and the broader Director-of-X
+# roles common in modern HE (student experience, innovation, knowledge
+# exchange, digital learning, leadership development, etc.).
+director_titles:
+  - associate dean
+  - pro-dean
+  - faculty pro-dean
+  - director of strategy
+  - director of innovation
+  - director of knowledge exchange
+  - director of enterprise
+  - director of student experience
+  - director of student success
+  - director of educational excellence
+  - director of leadership
+  - director of leadership development
+  - director of digital learning
+  - director of online learning
+  - director of external engagement
+  - director of engagement
+  - director of research
+  - director of access
+  - director of widening participation
+  - director of partnerships
+  - director of policy
+  - director of governance
+
 title_gate:
   - director
   - pvc
@@ -58,8 +87,14 @@ title_gate:
   - provost
   - vice-chancellor
 
+# Narrow technical-IC roles only. The bare term "software" was previously
+# blanket-excluded, which killed every legitimate EdTech / digital-learning
+# leadership role since their descriptions mention software. Use specific
+# job-title fragments instead.
 exclusion_terms:
-  - software
+  - software developer
+  - software engineer
+  - software architect
   - nurse
   - warehouse
   - developer
