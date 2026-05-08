@@ -1,12 +1,10 @@
 label: Charity Leadership
 db_path: charity_jobs.db
 output_prefix: charity_
-
 filters:
   minimum_score: 20
   salary_floor: 60000
   salary_target: 65000
-
 sources:
   - name: CharityJob CEO
     url: https://www.charityjob.co.uk/chief-executive-officer-jobs
@@ -15,8 +13,8 @@ sources:
     url: https://www.charityjob.co.uk/jobs?keywords=director+of+education+policy+programmes&category=director
     selector: "h3 a"
   - name: Prospectus
-    url: https://www.prospectus.co.uk/jobs/
-    selector: ".job-title a"
+    url: https://www.prospect-us.co.uk/job/
+    selector: "a[href*='/job/']"
   - name: NFP People
     url: https://careers.nfp-people.co.uk/jobs/
     selector: "a[href*='/job/']"
@@ -32,7 +30,6 @@ sources:
   - name: Third Sector Jobs
     url: https://jobs.thirdsector.co.uk/jobs/chief-executive/
     selector: "h3 a"
-
 weights:
   executive_bonus: 50
   director_bonus: 30
@@ -40,7 +37,6 @@ weights:
   expertise_signal: 15
   sector_fit_bonus: 15
   exclusion_penalty: -60
-
 exec_titles:
   - chief executive
   - ceo
@@ -49,7 +45,6 @@ exec_titles:
   - chief executive officer
   - head of organisation
   - managing director
-
 director_titles:
   - director of education
   - director of learning
@@ -83,7 +78,6 @@ director_titles:
   - head of professional development
   - head of standards
   - head of membership
-
 title_gate:
   - chief executive
   - ceo
@@ -93,7 +87,6 @@ title_gate:
   - head of
   - managing director
   - chief operating
-
 exclusion_terms:
   - software
   - developer
