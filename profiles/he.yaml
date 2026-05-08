@@ -4,6 +4,11 @@ output_prefix: ""
 
 filters:
   minimum_score: 25
+  # Salary signal: stated salary >= target awards +15; stated salary below
+  # floor penalises -15; no stated salary is treated as neutral. Most senior
+  # search-firm listings omit salary, so this is a tiebreaker, not a gate.
+  salary_floor: 60000
+  salary_target: 65000
 
 sources:
   - name: jobs.ac.uk
@@ -20,6 +25,31 @@ sources:
   - name: Perrett Laver
     url: https://candidates.perrettlaver.com/vacancies/
     selector: "a[href*='/vacancies/']"
+  # New HE exec-search firms — selectors are best-guess based on each site's
+  # public-facing listings page; verify on first run and remove any that
+  # return zero matches (likely JS-rendered, like Odgers Berndtson).
+  # Saxton Bampfylde — appointments page lists role cards; href pattern is
+  # typically /appointment/<slug> on the public site.
+  - name: Saxton Bampfylde
+    url: https://www.saxbam.com/appointments/
+    selector: "a[href*='/appointment/']"
+  # Anderson Quigley — opportunities page; href pattern targets vacancy links.
+  - name: Anderson Quigley
+    url: https://www.andersonquigley.com/opportunities/
+    selector: "a[href*='/opportunities/']"
+  # Dixon Walter — small WordPress site, vacancy detail pages live under
+  # /vacancy/<slug>; this selector targets the link from the listings index.
+  - name: Dixon Walter
+    url: https://www.dixonwalter.co.uk/vacancies/
+    selector: "a[href*='/vacancy/']"
+  # Veredus — public-sector exec search; jobs page server-rendered.
+  - name: Veredus
+    url: https://www.veredus.co.uk/jobs/
+    selector: "a[href*='/job/']"
+  # Minerva Search — boutique HE/charity exec search; positions page.
+  - name: Minerva Search
+    url: https://minervasearch.com/positions/
+    selector: "a[href*='/position/']"
 
 weights:
   executive_bonus: 50
