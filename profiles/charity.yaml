@@ -59,11 +59,28 @@ director_titles:
   - director of development
   - director of governance
   - director of quality
+  # Sector-body / membership-org senior titles — Charles's CV maps strongly
+  # onto skills, workforce, professional development, standards, membership
+  # and accreditation roles in education-adjacent charities.
+  - director of skills
+  - director of workforce
+  - director of professional development
+  - director of standards
+  - director of membership
+  - director of credentials
+  - director of accreditation
+  - director of innovation
+  - director of knowledge
+  - director of research
   - head of education
   - head of policy
   - head of programmes
   - head of learning
   - head of partnerships
+  - head of skills
+  - head of professional development
+  - head of standards
+  - head of membership
 
 title_gate:
   - chief executive
