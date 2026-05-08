@@ -1,0 +1,95 @@
+label: Sector Bodies & Professional Associations
+db_path: sector_bodies_jobs.db
+output_prefix: sector_
+
+filters:
+  minimum_score: 20
+
+sources:
+  - name: jobs.ac.uk Professional
+    url: https://www.jobs.ac.uk/search/director
+    selector: ".j-search-result__title a"
+  - name: CharityJob Policy
+    url: https://www.charityjob.co.uk/jobs?keywords=director+policy+education+sector&category=policy-public-affairs
+    selector: "h3 a"
+  - name: CharityJob Education
+    url: https://www.charityjob.co.uk/jobs?keywords=director+education+learning&category=education
+    selector: "h3 a"
+  - name: NFP People
+    url: https://careers.nfp-people.co.uk/jobs/
+    selector: "a[href*='/job/']"
+  - name: Prospectus
+    url: https://www.prospectus.co.uk/jobs/
+    selector: ".job-title a"
+  - name: Guardian Jobs Education
+    url: https://jobs.theguardian.com/jobs/education/senior-executive/
+    selector: ".js-job-title a"
+
+weights:
+  executive_bonus: 50
+  director_bonus: 35
+  permanent_signal: 20
+  expertise_signal: 20
+  sector_fit_bonus: 20
+  exclusion_penalty: -60
+
+exec_titles:
+  - chief executive
+  - ceo
+  - executive director
+  - director general
+  - chief executive officer
+  - managing director
+  - registrar
+
+director_titles:
+  - director of education
+  - director of learning
+  - director of policy
+  - director of quality
+  - director of standards
+  - director of accreditation
+  - director of programmes
+  - director of partnerships
+  - director of impact
+  - director of strategy
+  - director of development
+  - director of governance
+  - director of assessment
+  - director of research
+  - director of membership
+  - head of education
+  - head of policy
+  - head of quality
+  - head of learning
+  - head of standards
+  - head of accreditation
+  - head of partnerships
+  - head of programmes
+
+title_gate:
+  - chief executive
+  - ceo
+  - director
+  - head of
+  - registrar
+  - managing director
+  - secretary general
+
+exclusion_terms:
+  - software
+  - developer
+  - engineer
+  - technician
+  - warehouse
+  - nurse
+  - social worker
+  - counsellor
+  - therapist
+  - support worker
+  - sales director
+  - commercial director
+  - finance director
+  - it director
+  - digital director
+  - hr director

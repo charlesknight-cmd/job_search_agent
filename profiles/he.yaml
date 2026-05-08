@@ -1,0 +1,71 @@
+label: Higher Education Leadership
+db_path: jobs_he.db
+output_prefix: ""
+
+filters:
+  minimum_score: 25
+
+sources:
+  - name: jobs.ac.uk
+    url: https://www.jobs.ac.uk/search/senior-management
+    selector: ".j-search-result__title a"
+  - name: THE UniJobs
+    url: https://www.timeshighereducation.com/unijobs/listings/united-kingdom/
+    selector: ".job-results__title a"
+  - name: Peridot Partners
+    url: https://www.peridotpartners.co.uk/job-role/education-executive-roles/
+    selector: ".card-title a"
+  # Odgers Berndtson excluded: vacancies are JavaScript-rendered, not in HTML source
+  # Perrett Laver: selector targets vacancy links by href pattern — verify on first run
+  - name: Perrett Laver
+    url: https://candidates.perrettlaver.com/vacancies/
+    selector: "a[href*='/vacancies/']"
+
+weights:
+  executive_bonus: 50
+  permanent_signal: 25
+  expertise_signal: 20
+  geography_bonus: 20
+  exclusion_penalty: -60
+
+exec_titles:
+  - pro-vice-chancellor
+  - pvc
+  - registrar
+  - principal
+  - provost
+  - vice-principal
+  - chief executive
+  - ceo
+  - dean
+  - vice-chancellor
+  - director of education
+  - director of student
+  - director of academic
+  - director of quality
+  - director of learning
+  - director of teaching
+
+title_gate:
+  - director
+  - pvc
+  - dean
+  - ceo
+  - chief
+  - registrar
+  - head of
+  - principal
+  - provost
+  - vice-chancellor
+
+exclusion_terms:
+  - software
+  - nurse
+  - warehouse
+  - developer
+  - technician
+  - estates
+  - facilities
+  - catering
+  - porter
+  - security
