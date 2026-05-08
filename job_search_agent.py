@@ -176,13 +176,15 @@ PROFILES = {"he": HE_CONFIG, "charity": CHARITY_CONFIG, "sector": SECTOR_BODIES_
 
 
 # --- DESCRIPTION EXTRACTION ---
-def extract_description(html: str) -> str:
+def extract_description(page_html: str) -> str:
     """
     Extract meaningful job description text from a detail page.
     Tries semantic/common job-content containers first, falls back to <body>.
     Strips nav, header, footer, and script noise before falling back.
     """
-    soup = BeautifulSoup(html, "lxml")
+    # Parameter is named ``page_html`` (not ``html``) so it does not shadow the
+    # standard-library ``html`` module imported at the top of this file.
+    soup = BeautifulSoup(page_html, "lxml")
 
     # Remove boilerplate elements unconditionally
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
@@ -271,7 +273,10 @@ def score_job(job: Job, config: Dict) -> Job:
 
     # 3. Permanent vs interim
     senior_match = "Executive Level" in job.match_reasons or "Director Level" in job.match_reasons
-    if "permanent" in full_text or "substantive" in full_text:
+    # Use word-boundary regex so "non-permanent" / "non-substantive" don't trip
+    # the +permanent_signal bonus via simple substring match.
+    permanent_re = re.compile(r"(?<![\w-])(?:permanent|substantive)\b", re.IGNORECASE)
+    if permanent_re.search(full_text):
         job.score += w["permanent_signal"]
         job.match_reasons.append("Permanent")
     elif any(t in full_text for t in ["interim", "fixed-term", "fixed term"]):
@@ -363,8 +368,13 @@ class Database:
         self.conn.commit()
 
     def find_canonical(self, title: str, url: str) -> bool:
+        # Dedupe by URL only. Title alone is unsafe — two genuinely different
+        # roles called "Director of Education" at different employers must NOT
+        # collapse into one record. ``title`` is kept in the signature for
+        # future heuristics (e.g. fuzzy reposting detection).
+        del title
         return self.conn.execute(
-            "SELECT 1 FROM jobs WHERE title = ? OR url = ?", (title, url)
+            "SELECT 1 FROM jobs WHERE url = ?", (url,)
         ).fetchone() is not None
 
     def upsert_job(self, job: Job):
@@ -392,18 +402,44 @@ class Database:
 
 
 # --- HTTP WITH RETRY ---
+RETRY_AFTER_CAP = 60.0  # seconds — never honour a Retry-After value above this
+
+
+def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+    """Parse a Retry-After header value (delta-seconds only).
+
+    Returns ``None`` if the header is missing, blank, or not a non-negative
+    number. HTTP-date form is intentionally not supported — the variance
+    between server clock and runner clock is not worth the complexity here.
+    """
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, RETRY_AFTER_CAP)
+
+
 async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> Optional[httpx.Response]:
     """Fetch a URL with simple retry on transient errors (429, 503, network failures).
 
     Returns the response only if the status is 2xx. 4xx (other than 429) is treated as a
     permanent failure and returns None — the caller should not parse a 404 page as content.
+    Honours the ``Retry-After`` header when present (capped at RETRY_AFTER_CAP).
     """
     for attempt in range(MAX_RETRIES + 1):
         try:
             resp = await client.get(url, timeout=TIMEOUT)
             if resp.status_code in (429, 503) and attempt < MAX_RETRIES:
-                # Backoff with jitter to avoid thundering-herd retries against rate limiters
-                wait = RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
+                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                if retry_after is not None:
+                    wait = retry_after + random.uniform(0, 0.5)
+                else:
+                    # Backoff with jitter to avoid thundering-herd retries against rate limiters
+                    wait = RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
                 logger.warning(f"HTTP {resp.status_code} on {url} — retrying in {wait:.1f}s")
                 await asyncio.sleep(wait)
                 continue
@@ -447,8 +483,15 @@ def generate_html_report(rows: list, title: str, filename: str):
         scheme = urlparse(url).scheme.lower()
         safe_url = html.escape(url, quote=True) if scheme in ("http", "https") else "#"
 
-        description_excerpt = (r["description"] or "")[:400]
-        ellipsis = "..." if description_excerpt else ""
+        full_description = r["description"] or ""
+        description_excerpt = full_description[:400]
+        # Only show the ellipsis if we actually truncated the description.
+        ellipsis = "..." if len(full_description) > 400 else ""
+
+        score_value = r["score"] if r["score"] is not None else 0
+        score_display = (
+            int(score_value) if float(score_value).is_integer() else round(score_value, 1)
+        )
 
         cards.append(f"""
             <div style="border:1px solid #e0e0e0; padding:20px; margin-bottom:20px;
@@ -458,7 +501,7 @@ def generate_html_report(rows: list, title: str, filename: str):
                     <h3 style="margin:0 0 6px 0; color:#1a237e;">{html.escape(r['title'] or '')}</h3>
                     <span style="font-size:0.8em; background:#1a237e; color:white;
                                  padding:3px 8px; border-radius:4px; white-space:nowrap;">
-                        Score: {r['score']}
+                        Score: {score_display}
                     </span>
                 </div>
                 <p style="margin:0 0 10px 0;"><strong>{html.escape(r['employer'] or '')}</strong></p>
@@ -492,7 +535,7 @@ def generate_html_report(rows: list, title: str, filename: str):
         {safe_title}
     </h2>
     <p style='font-family:sans-serif; color:#666; font-size:0.9em;'>
-        Generated: {datetime.now().strftime('%d %B %Y %H:%M')}
+        Generated: {datetime.now(timezone.utc).strftime('%d %B %Y %H:%M UTC')}
         &nbsp;|&nbsp; {len(rows)} role(s) listed
     </p>
     {content}

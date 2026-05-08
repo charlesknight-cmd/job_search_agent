@@ -49,8 +49,24 @@ pre-commit install        # run on every commit
 pre-commit run --all-files
 ```
 
-There is no test suite at present. If you add one, place tests under `tests/`
-and wire `pytest` into the workflow.
+A small test suite lives under `tests/`. The tests use only the standard
+library `unittest` framework so they run without any extra install:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+`pytest` will also discover them if you prefer:
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Coverage focus: `score_job` (including the regression test for the
+`non-permanent` false-positive bug), `extract_employer`, and
+`_parse_retry_after`. When changing scoring logic, add a test case here
+first so the behaviour is captured.
 
 ## Adding a new source
 
