@@ -1,12 +1,10 @@
 label: Sector Bodies & Professional Associations
 db_path: sector_bodies_jobs.db
 output_prefix: sector_
-
 filters:
   minimum_score: 20
   salary_floor: 60000
   salary_target: 65000
-
 sources:
   - name: jobs.ac.uk Professional
     url: https://www.jobs.ac.uk/search/director
@@ -21,12 +19,9 @@ sources:
     url: https://careers.nfp-people.co.uk/jobs/
     selector: "a[href*='/job/']"
   - name: Prospectus
-    url: https://www.prospectus.co.uk/jobs/
-    selector: ".job-title a"
-  - name: Guardian Jobs Education
-    url: https://jobs.theguardian.com/jobs/education/senior-executive/
-    selector: ".js-job-title a"
-
+    url: https://www.prospect-us.co.uk/job/
+    selector: "a[href*='/job/']"
+  # Guardian Jobs Education excluded: returns 403 Forbidden (anti-bot blocking)
 weights:
   executive_bonus: 50
   director_bonus: 35
@@ -34,7 +29,6 @@ weights:
   expertise_signal: 20
   sector_fit_bonus: 20
   exclusion_penalty: -60
-
 exec_titles:
   - chief executive
   - ceo
@@ -43,7 +37,6 @@ exec_titles:
   - chief executive officer
   - managing director
   - registrar
-
 director_titles:
   - director of education
   - director of learning
@@ -81,7 +74,6 @@ director_titles:
   - head of professional development
   - head of credentials
   - head of membership
-
 title_gate:
   - chief executive
   - ceo
@@ -90,7 +82,6 @@ title_gate:
   - registrar
   - managing director
   - secretary general
-
 exclusion_terms:
   - software
   - developer
