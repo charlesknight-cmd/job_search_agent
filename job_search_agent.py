@@ -7,10 +7,12 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import List, Optional, Dict
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import yaml
 from bs4 import BeautifulSoup
 
 # --- SYSTEM SETTINGS ---
@@ -20,13 +22,29 @@ MAX_DESCRIPTION_CHARS = 5000
 REPORT_ROW_LIMIT = 200
 MAX_RETRIES = 2
 RETRY_BACKOFF = 3.0  # seconds
+# Mark jobs not re-seen within this window as stale.
+STALE_AFTER_HOURS = 168
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler("job_search.log"), logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
+
+
+def setup_logging(level: int = logging.INFO, log_file: str = "job_search.log") -> None:
+    """Configure root logging for the CLI entry point.
+
+    Called from ``__main__`` so importing the module (e.g. from tests) does
+    not reconfigure logging or open a file handler.
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    root.setLevel(level)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh = logging.FileHandler(log_file)
+    fh.setFormatter(formatter)
+    sh = logging.StreamHandler()
+    sh.setFormatter(formatter)
+    root.addHandler(fh)
+    root.addHandler(sh)
 
 
 @dataclass
@@ -43,135 +61,40 @@ class Job:
 
 
 # --- CONFIGURATION ---
-HE_CONFIG = {
-    "label": "Higher Education Leadership",
-    "db_path": "jobs_he.db",
-    "output_prefix": "",
-    "filters": {"minimum_score": 25},
-    "sources": [
-        {"name": "jobs.ac.uk", "url": "https://www.jobs.ac.uk/search/senior-management", "selector": ".j-search-result__title a"},
-        {"name": "THE UniJobs", "url": "https://www.timeshighereducation.com/unijobs/listings/united-kingdom/", "selector": ".job-results__title a"},
-        {"name": "Peridot Partners", "url": "https://www.peridotpartners.co.uk/job-role/education-executive-roles/", "selector": ".card-title a"},
-        # Odgers Berndtson excluded: vacancies are JavaScript-rendered, not in HTML source
-        # Perrett Laver: selector targets vacancy links by href pattern — verify on first run
-        {"name": "Perrett Laver", "url": "https://candidates.perrettlaver.com/vacancies/", "selector": "a[href*='/vacancies/']"},
-    ],
-    "weights": {
-        "executive_bonus": 50,
-        "permanent_signal": 25,
-        "expertise_signal": 20,
-        "geography_bonus": 20,
-        "exclusion_penalty": -60,
-    },
-    "exec_titles": [
-        "pro-vice-chancellor", "pvc", "registrar", "principal", "provost",
-        "vice-principal", "chief executive", "ceo", "dean", "vice-chancellor",
-        "director of education", "director of student", "director of academic",
-        "director of quality", "director of learning", "director of teaching",
-    ],
-    "title_gate": [
-        "director", "pvc", "dean", "ceo", "chief", "registrar",
-        "head of", "principal", "provost", "vice-chancellor",
-    ],
-    "exclusion_terms": [
-        "software", "nurse", "warehouse", "developer", "technician",
-        "estates", "facilities", "catering", "porter", "security",
-    ],
+# Search profiles live in YAML files under ``profiles/`` so non-Python users
+# can edit search parameters without touching this module.
+PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
+
+REQUIRED_PROFILE_KEYS = {
+    "label", "db_path", "output_prefix", "filters", "sources",
+    "weights", "exec_titles", "title_gate", "exclusion_terms",
 }
 
-CHARITY_CONFIG = {
-    "label": "Charity Leadership",
-    "db_path": "charity_jobs.db",
-    "output_prefix": "charity_",
-    "filters": {"minimum_score": 20},
-    "sources": [
-        {"name": "CharityJob CEO", "url": "https://www.charityjob.co.uk/chief-executive-officer-jobs", "selector": "h3 a"},
-        {"name": "CharityJob Director", "url": "https://www.charityjob.co.uk/jobs?keywords=director+of+education+policy+programmes&category=director", "selector": "h3 a"},
-        {"name": "Prospectus", "url": "https://www.prospectus.co.uk/jobs/", "selector": ".job-title a"},
-        {"name": "NFP People", "url": "https://careers.nfp-people.co.uk/jobs/", "selector": "a[href*='/job/']"},
-        {"name": "NFP Consulting", "url": "https://nfpconsulting.co.uk/jobs", "selector": ".job-title a"},
-        {"name": "Harris Hill", "url": "https://www.harrishill.co.uk/jobs/?category=chief-executive", "selector": ".job-listing__title a"},
-        {"name": "Harris Hill Director", "url": "https://www.harrishill.co.uk/jobs/?category=director", "selector": ".job-listing__title a"},
-        {"name": "Third Sector Jobs", "url": "https://jobs.thirdsector.co.uk/jobs/chief-executive/", "selector": "h3 a"},
-    ],
-    "weights": {
-        "executive_bonus": 50,
-        "director_bonus": 30,
-        "permanent_signal": 20,
-        "expertise_signal": 15,
-        "sector_fit_bonus": 15,
-        "exclusion_penalty": -60,
-    },
-    "exec_titles": [
-        "chief executive", "ceo", "executive director", "director general",
-        "chief executive officer", "head of organisation", "managing director",
-    ],
-    "director_titles": [
-        "director of education", "director of learning", "director of policy",
-        "director of programmes", "director of partnerships", "director of impact",
-        "director of strategy", "director of development", "director of governance",
-        "director of quality", "head of education", "head of policy",
-        "head of programmes", "head of learning", "head of partnerships",
-    ],
-    "title_gate": [
-        "chief executive", "ceo", "executive director", "director general",
-        "director of", "head of", "managing director", "chief operating",
-    ],
-    "exclusion_terms": [
-        "software", "developer", "engineer", "technician", "warehouse",
-        "nurse", "social worker", "counsellor", "therapist", "support worker",
-        "community fundraiser", "events coordinator", "marketing officer",
-        "communications officer", "fundraising manager",
-    ],
-}
 
-SECTOR_BODIES_CONFIG = {
-    "label": "Sector Bodies & Professional Associations",
-    "db_path": "sector_bodies_jobs.db",
-    "output_prefix": "sector_",
-    "filters": {"minimum_score": 20},
-    "sources": [
-        {"name": "jobs.ac.uk Professional", "url": "https://www.jobs.ac.uk/search/director", "selector": ".j-search-result__title a"},
-        {"name": "CharityJob Policy", "url": "https://www.charityjob.co.uk/jobs?keywords=director+policy+education+sector&category=policy-public-affairs", "selector": "h3 a"},
-        {"name": "CharityJob Education", "url": "https://www.charityjob.co.uk/jobs?keywords=director+education+learning&category=education", "selector": "h3 a"},
-        {"name": "NFP People", "url": "https://careers.nfp-people.co.uk/jobs/", "selector": "a[href*='/job/']"},
-        {"name": "Prospectus", "url": "https://www.prospectus.co.uk/jobs/", "selector": ".job-title a"},
-        {"name": "Guardian Jobs Education", "url": "https://jobs.theguardian.com/jobs/education/senior-executive/", "selector": ".js-job-title a"},
-    ],
-    "weights": {
-        "executive_bonus": 50,
-        "director_bonus": 35,
-        "permanent_signal": 20,
-        "expertise_signal": 20,
-        "sector_fit_bonus": 20,
-        "exclusion_penalty": -60,
-    },
-    "exec_titles": [
-        "chief executive", "ceo", "executive director", "director general",
-        "chief executive officer", "managing director", "registrar",
-    ],
-    "director_titles": [
-        "director of education", "director of learning", "director of policy",
-        "director of quality", "director of standards", "director of accreditation",
-        "director of programmes", "director of partnerships", "director of impact",
-        "director of strategy", "director of development", "director of governance",
-        "director of assessment", "director of research", "director of membership",
-        "head of education", "head of policy", "head of quality",
-        "head of learning", "head of standards", "head of accreditation",
-        "head of partnerships", "head of programmes",
-    ],
-    "title_gate": [
-        "chief executive", "ceo", "director", "head of", "registrar",
-        "managing director", "secretary general",
-    ],
-    "exclusion_terms": [
-        "software", "developer", "engineer", "technician", "warehouse",
-        "nurse", "social worker", "counsellor", "therapist", "support worker",
-        "sales director", "commercial director", "finance director",
-        "it director", "digital director", "hr director",
-    ],
-}
+def load_profile(name: str, profiles_dir: Optional[Path] = None) -> Dict:
+    """Load a search profile from ``profiles/<name>.yaml``.
 
+    Raises FileNotFoundError if the profile file does not exist, and
+    ValueError if required keys are missing — failing fast is better than
+    scraping with a malformed config.
+    """
+    base = profiles_dir or PROFILES_DIR
+    path = base / f"{name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Profile not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Profile {name} did not parse to a mapping")
+    missing = REQUIRED_PROFILE_KEYS - cfg.keys()
+    if missing:
+        raise ValueError(f"Profile {name} is missing required keys: {sorted(missing)}")
+    return cfg
+
+
+HE_CONFIG = load_profile("he")
+CHARITY_CONFIG = load_profile("charity")
+SECTOR_BODIES_CONFIG = load_profile("sector")
 PROFILES = {"he": HE_CONFIG, "charity": CHARITY_CONFIG, "sector": SECTOR_BODIES_CONFIG}
 
 
@@ -356,6 +279,7 @@ class Database:
                 reasons TEXT,
                 fetched_at TEXT,
                 first_seen_at TEXT,
+                last_seen_at TEXT,
                 status TEXT DEFAULT 'new'
             )
         """)
@@ -365,6 +289,8 @@ class Database:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN reasons TEXT")
         if "status" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
+        if "last_seen_at" not in cols:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TEXT")
         self.conn.commit()
 
     def find_canonical(self, title: str, url: str) -> bool:
@@ -380,18 +306,43 @@ class Database:
     def upsert_job(self, job: Job):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute("""
-            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at, last_seen_at, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
             ON CONFLICT(fingerprint) DO UPDATE SET
                 score = excluded.score,
                 reasons = excluded.reasons,
-                fetched_at = excluded.fetched_at
+                fetched_at = excluded.fetched_at,
+                last_seen_at = excluded.last_seen_at
         """, (
             job.fingerprint, job.title, job.employer, job.url,
             job.description, job.score, ", ".join(job.match_reasons),
-            job.fetched_at, now
+            job.fetched_at, now, now
         ))
         self.conn.commit()
+
+    def touch_seen(self, url: str) -> None:
+        """Record that an already-known URL was seen on this run.
+
+        Lets stale-marking distinguish jobs still listed on the source from
+        jobs that have actually disappeared.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            "UPDATE jobs SET last_seen_at = ? WHERE url = ?", (now, url)
+        )
+        self.conn.commit()
+
+    def mark_stale(self, hours: int = STALE_AFTER_HOURS) -> int:
+        """Mark jobs not seen within ``hours`` as 'stale'. Returns affected row count."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        cursor = self.conn.execute(
+            "UPDATE jobs SET status = 'stale' "
+            "WHERE status NOT IN ('stale', 'rejected') "
+            "AND (last_seen_at IS NULL OR last_seen_at < ?)",
+            (cutoff,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
 
     def get_recent(self, hours: int, min_score: float) -> list:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -543,8 +494,10 @@ def generate_html_report(rows: list, title: str, filename: str):
 
 
 # --- EXECUTION ---
-async def process_profile(profile_key: str, weekly: bool):
+async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
     cfg = PROFILES[profile_key]
+    if dry_run:
+        logger.info(f"[dry-run] {profile_key}: scoring only — no DB writes, no report")
 
     with Database(cfg["db_path"]) as db:
         async with httpx.AsyncClient(
@@ -569,6 +522,10 @@ async def process_profile(profile_key: str, weekly: bool):
                         url = urljoin(src["url"], href)
 
                         if db.find_canonical(raw_title, url):
+                            # Known URL — refresh last_seen_at so stale-marking
+                            # only fires when the listing actually disappears.
+                            if not dry_run:
+                                db.touch_seen(url)
                             continue
 
                         if not any(t in raw_title.lower() for t in cfg["title_gate"]):
@@ -594,11 +551,21 @@ async def process_profile(profile_key: str, weekly: bool):
 
                         job = score_job(job, cfg)
                         if job.score >= cfg["filters"]["minimum_score"]:
-                            db.upsert_job(job)
-                            logger.info(f"Saved: [{job.score}] {job.title} @ {job.employer}")
+                            if dry_run:
+                                logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")
+                            else:
+                                db.upsert_job(job)
+                                logger.info(f"Saved: [{job.score}] {job.title} @ {job.employer}")
 
                 except Exception as e:
                     logger.error(f"Error scraping {src['name']}: {e}")
+
+        if dry_run:
+            return
+
+        stale_count = db.mark_stale()
+        if stale_count:
+            logger.info(f"Marked {stale_count} job(s) as stale (not seen in {STALE_AFTER_HOURS}h)")
 
         window_hours = 168 if weekly else 24
         recent = db.get_recent(window_hours, cfg["filters"]["minimum_score"])
@@ -613,15 +580,18 @@ async def process_profile(profile_key: str, weekly: bool):
 
 if __name__ == "__main__":
     import argparse
+    setup_logging()
     p = argparse.ArgumentParser(description="Job search agent for HE leadership and charity CEO roles")
     p.add_argument("--profile", choices=["he", "charity", "sector", "all"], default="he",
                    help="Which search profile to run (all runs every profile)")
     p.add_argument("--weekly", action="store_true",
                    help="Generate a 7-day digest instead of 24-hour update")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Scrape and score but do not write to the DB or generate a report — useful for iterating on selectors and scoring")
     args = p.parse_args()
 
     if args.profile == "all":
         for profile_key in ["he", "charity", "sector"]:
-            asyncio.run(process_profile(profile_key, args.weekly))
+            asyncio.run(process_profile(profile_key, args.weekly, args.dry_run))
     else:
-        asyncio.run(process_profile(args.profile, args.weekly))
+        asyncio.run(process_profile(args.profile, args.weekly, args.dry_run))

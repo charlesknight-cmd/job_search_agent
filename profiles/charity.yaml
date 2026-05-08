@@ -1,0 +1,93 @@
+label: Charity Leadership
+db_path: charity_jobs.db
+output_prefix: charity_
+
+filters:
+  minimum_score: 20
+
+sources:
+  - name: CharityJob CEO
+    url: https://www.charityjob.co.uk/chief-executive-officer-jobs
+    selector: "h3 a"
+  - name: CharityJob Director
+    url: https://www.charityjob.co.uk/jobs?keywords=director+of+education+policy+programmes&category=director
+    selector: "h3 a"
+  - name: Prospectus
+    url: https://www.prospectus.co.uk/jobs/
+    selector: ".job-title a"
+  - name: NFP People
+    url: https://careers.nfp-people.co.uk/jobs/
+    selector: "a[href*='/job/']"
+  - name: NFP Consulting
+    url: https://nfpconsulting.co.uk/jobs
+    selector: ".job-title a"
+  - name: Harris Hill
+    url: https://www.harrishill.co.uk/jobs/?category=chief-executive
+    selector: ".job-listing__title a"
+  - name: Harris Hill Director
+    url: https://www.harrishill.co.uk/jobs/?category=director
+    selector: ".job-listing__title a"
+  - name: Third Sector Jobs
+    url: https://jobs.thirdsector.co.uk/jobs/chief-executive/
+    selector: "h3 a"
+
+weights:
+  executive_bonus: 50
+  director_bonus: 30
+  permanent_signal: 20
+  expertise_signal: 15
+  sector_fit_bonus: 15
+  exclusion_penalty: -60
+
+exec_titles:
+  - chief executive
+  - ceo
+  - executive director
+  - director general
+  - chief executive officer
+  - head of organisation
+  - managing director
+
+director_titles:
+  - director of education
+  - director of learning
+  - director of policy
+  - director of programmes
+  - director of partnerships
+  - director of impact
+  - director of strategy
+  - director of development
+  - director of governance
+  - director of quality
+  - head of education
+  - head of policy
+  - head of programmes
+  - head of learning
+  - head of partnerships
+
+title_gate:
+  - chief executive
+  - ceo
+  - executive director
+  - director general
+  - director of
+  - head of
+  - managing director
+  - chief operating
+
+exclusion_terms:
+  - software
+  - developer
+  - engineer
+  - technician
+  - warehouse
+  - nurse
+  - social worker
+  - counsellor
+  - therapist
+  - support worker
+  - community fundraiser
+  - events coordinator
+  - marketing officer
+  - communications officer
+  - fundraising manager
