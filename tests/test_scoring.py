@@ -12,6 +12,7 @@ from job_search_agent import (  # noqa: E402
     CHARITY_CONFIG,
     HE_CONFIG,
     Job,
+    extract_salary,
     score_job,
 )
 
@@ -219,6 +220,107 @@ class TestTitleGateAndScoring(unittest.TestCase):
         # bounded score and not raise.
         job = score_job(_make_job("Vice-Chancellor", ""), HE_CONFIG)
         self.assertIsInstance(job.score, float)
+
+
+class TestSalaryExtraction(unittest.TestCase):
+    """``extract_salary`` returns the highest plausible GBP figure (in pounds)."""
+
+    def test_k_suffix(self):
+        self.assertEqual(extract_salary("Salary: £75k"), 75000)
+
+    def test_k_suffix_uppercase_with_space(self):
+        self.assertEqual(extract_salary("Salary: £ 75K"), 75000)
+
+    def test_comma_form(self):
+        self.assertEqual(extract_salary("Salary: £75,000 plus benefits"), 75000)
+
+    def test_circa_form(self):
+        self.assertEqual(extract_salary("circa £65,000"), 65000)
+
+    def test_band_picks_highest(self):
+        # "£70k-£80k" — both endpoints match; we want the top of the band so a
+        # senior role isn't mis-scored on its floor.
+        self.assertEqual(extract_salary("Salary range £70k-£80k"), 80000)
+
+    def test_band_with_comma_form(self):
+        self.assertEqual(
+            extract_salary("Salary range £60,000-£75,000"), 75000
+        )
+
+    def test_voucher_amount_rejected(self):
+        # "£25 voucher" should not be treated as a salary signal.
+        self.assertIsNone(extract_salary("Receive a £25 gift voucher"))
+
+    def test_no_salary_returns_none(self):
+        self.assertIsNone(extract_salary("Permanent senior leadership role"))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(extract_salary(""))
+
+    def test_kg_does_not_match(self):
+        # "75kg" should not trip the £75k branch via the unit suffix.
+        self.assertIsNone(extract_salary("Capacity for £25kg of equipment"))
+
+    def test_bare_digit_form(self):
+        # Some listings use "£75000" without comma or k suffix.
+        self.assertEqual(extract_salary("Salary: £75000 per annum"), 75000)
+
+
+class TestSalaryScoring(unittest.TestCase):
+    """Salary signal contributes a bonus or penalty around the configured thresholds."""
+
+    def _score_with_desc(self, description: str, config=HE_CONFIG) -> Job:
+        return score_job(
+            _make_job("Director of Innovation", description), config
+        )
+
+    def test_salary_at_or_above_target_awards_bonus(self):
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £75,000 per annum."
+        )
+        self.assertIn("Salary Match", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
+
+    def test_salary_below_floor_penalised(self):
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £45,000 per annum."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Salary Match", job.match_reasons)
+
+    def test_salary_between_floor_and_target_neutral(self):
+        # £62k sits between floor (60k) and target (65k) — neither bonus
+        # nor penalty.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £62,000 per annum."
+        )
+        self.assertNotIn("Salary Match", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
+
+    def test_no_salary_in_description_neutral(self):
+        # No stated salary — most exec-search listings — should not add or
+        # subtract anything.
+        job = self._score_with_desc(
+            "Permanent senior leadership role driving knowledge exchange."
+        )
+        self.assertNotIn("Salary Match", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
+
+    def test_salary_at_target_boundary_awards_bonus(self):
+        # Boundary: a salary exactly at the target (£65,000) earns the bonus.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £65,000."
+        )
+        self.assertIn("Salary Match", job.match_reasons)
+
+    def test_salary_at_floor_boundary_neutral(self):
+        # Boundary: a salary exactly at the floor (£60,000) is *not* below it,
+        # so no penalty — but it's also not at target, so no bonus.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £60,000."
+        )
+        self.assertNotIn("Salary Match", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
 
 
 if __name__ == "__main__":

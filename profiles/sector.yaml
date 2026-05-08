@@ -4,6 +4,8 @@ output_prefix: sector_
 
 filters:
   minimum_score: 20
+  salary_floor: 60000
+  salary_target: 65000
 
 sources:
   - name: jobs.ac.uk Professional

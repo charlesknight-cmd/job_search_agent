@@ -138,6 +138,51 @@ def extract_description(page_html: str) -> str:
     return soup.get_text(" ", strip=True)[:MAX_DESCRIPTION_CHARS]
 
 
+# --- SALARY EXTRACTION ---
+# Three alternatives, each capturing the digits group:
+#   £NNk / £NNNk     (suffix form, 2-3 digits + k/K)
+#   £NN,NNN          (thousand-separator form)
+#   £NNNN-£NNNNNNN   (bare 4-7 digit form, e.g. "£75000")
+# The k-form's negative lookahead avoids matching units like "£75kg".
+# The bare form's lookahead avoids partial matches inside larger numbers.
+SALARY_RE = re.compile(
+    r"£\s*(\d{2,3})\s*[kK](?![a-zA-Z])"
+    r"|"
+    r"£\s*(\d{1,3}(?:,\d{3})+)"
+    r"|"
+    r"£\s*(\d{4,7})(?!\d)"
+)
+# Reject anything below this once normalised to pounds — keeps voucher/expense
+# amounts ("£25 gift voucher") from polluting the salary signal.
+MIN_PLAUSIBLE_SALARY = 1000
+
+
+def extract_salary(text: str) -> Optional[int]:
+    """Return the highest plausible GBP salary figure in ``text``, or ``None``.
+
+    Picking the highest value (not the first) handles bands like
+    "£60k-£85k" — we want the top of the band so a senior role isn't
+    mis-scored on its floor. Returns ``None`` when nothing plausible is
+    found, which the caller treats as a neutral signal (no bonus, no penalty).
+    """
+    if not text:
+        return None
+    best: Optional[int] = None
+    for match in SALARY_RE.finditer(text):
+        k_form, comma_form, bare_form = match.groups()
+        if k_form is not None:
+            amount = int(k_form) * 1000
+        elif comma_form is not None:
+            amount = int(comma_form.replace(",", ""))
+        else:
+            amount = int(bare_form)
+        if amount < MIN_PLAUSIBLE_SALARY:
+            continue
+        if best is None or amount > best:
+            best = amount
+    return best
+
+
 # --- EMPLOYER EXTRACTION ---
 def extract_employer(title: str, description: str, source_name: str) -> str:
     """
@@ -289,6 +334,26 @@ def score_job(job: Job, config: Dict) -> Job:
         if any(t in full_text for t in sector_terms):
             job.score += w["sector_fit_bonus"]
             job.match_reasons.append("Sector Fit")
+
+    # 7. Salary signal
+    # Bonus when a stated salary clears the target, penalty when it's clearly
+    # below the floor, neutral otherwise (including when no salary is stated —
+    # most senior search-firm listings omit it). Thresholds and bonus magnitude
+    # are profile-tunable so charity/sector targets can differ from HE.
+    filters = config.get("filters", {})
+    salary_floor = filters.get("salary_floor", 60000)
+    salary_target = filters.get("salary_target", 65000)
+    salary_bonus = w.get("salary_bonus", 15)
+    # Title is rarely where salary is stated, but include it cheaply for the
+    # occasional "Director (£90k)" style listing.
+    salary = extract_salary(f"{job.title} {job.description}")
+    if salary is not None:
+        if salary >= salary_target:
+            job.score += salary_bonus
+            job.match_reasons.append("Salary Match")
+        elif salary < salary_floor:
+            job.score -= salary_bonus
+            job.match_reasons.append("Below Target")
 
     return job
 
