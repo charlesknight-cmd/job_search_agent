@@ -61,6 +61,12 @@ weights:
 
 exec_titles:
   - pro-vice-chancellor
+  # Hyphenation varies across job boards: "Pro Vice-Chancellor" (jobs.ac.uk
+  # style), "Pro Vice Chancellor" (some exec-search firms), and the fully
+  # hyphenated form above. Match all three so the Associate/Deputy variants
+  # get the executive bonus regardless of how the source punctuates the title.
+  - pro vice-chancellor
+  - pro vice chancellor
   - pvc
   - registrar
   - principal
@@ -70,6 +76,7 @@ exec_titles:
   - ceo
   - dean
   - vice-chancellor
+  - vice chancellor
   - director of education
   - director of student
   - director of academic
@@ -116,6 +123,10 @@ title_gate:
   - principal
   - provost
   - vice-chancellor
+  # Unhyphenated variant — without this, "Associate Pro Vice Chancellor" and
+  # "Pro Vice Chancellor" (common on jobs.ac.uk and some exec-search firms)
+  # would be dropped at the gate before the description is even fetched.
+  - vice chancellor
 
 # Narrow technical-IC roles only. The bare term "software" was previously
 # blanket-excluded, which killed every legitimate EdTech / digital-learning

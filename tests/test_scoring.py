@@ -222,6 +222,81 @@ class TestTitleGateAndScoring(unittest.TestCase):
         self.assertIsInstance(job.score, float)
 
 
+class TestAssociatePVCHyphenation(unittest.TestCase):
+    """Regression: hyphenation variants of (Associate) Pro Vice-Chancellor
+    must all clear the title_gate and earn the executive bonus.
+
+    Job boards punctuate this title inconsistently — jobs.ac.uk uses
+    "Pro Vice-Chancellor", some exec-search firms use the fully
+    unhyphenated "Pro Vice Chancellor". Before this fix the unhyphenated
+    forms were silently dropped at the title_gate.
+    """
+
+    def _assert_passes_title_gate(self, title: str):
+        gate_terms = HE_CONFIG["title_gate"]
+        self.assertTrue(
+            any(t in title.lower() for t in gate_terms),
+            f"Title {title!r} did not match any title_gate term",
+        )
+
+    def test_associate_pvc_short_form_passes(self):
+        self._assert_passes_title_gate("Associate PVC (Education)")
+        job = score_job(
+            _make_job(
+                "Associate PVC (Education)",
+                "Permanent senior leadership role",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Executive Level", job.match_reasons)
+
+    def test_associate_pro_vice_chancellor_hyphenated_passes(self):
+        self._assert_passes_title_gate("Associate Pro-Vice-Chancellor")
+        job = score_job(
+            _make_job(
+                "Associate Pro-Vice-Chancellor",
+                "Permanent senior leadership role",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Executive Level", job.match_reasons)
+
+    def test_associate_pro_vice_chancellor_mixed_hyphens_passes(self):
+        # "Pro Vice-Chancellor" — jobs.ac.uk's typical format.
+        self._assert_passes_title_gate("Associate Pro Vice-Chancellor")
+        job = score_job(
+            _make_job(
+                "Associate Pro Vice-Chancellor",
+                "Permanent senior leadership role",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Executive Level", job.match_reasons)
+
+    def test_associate_pro_vice_chancellor_unhyphenated_passes(self):
+        # Fully unhyphenated form previously dropped at the title_gate.
+        self._assert_passes_title_gate("Associate Pro Vice Chancellor")
+        job = score_job(
+            _make_job(
+                "Associate Pro Vice Chancellor",
+                "Permanent senior leadership role",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Executive Level", job.match_reasons)
+
+    def test_bare_pro_vice_chancellor_unhyphenated_passes(self):
+        self._assert_passes_title_gate("Pro Vice Chancellor for Research")
+        job = score_job(
+            _make_job(
+                "Pro Vice Chancellor for Research",
+                "Permanent senior leadership role",
+            ),
+            HE_CONFIG,
+        )
+        self.assertIn("Executive Level", job.match_reasons)
+
+
 class TestSalaryExtraction(unittest.TestCase):
     """``extract_salary`` returns the highest plausible GBP figure (in pounds)."""
 
