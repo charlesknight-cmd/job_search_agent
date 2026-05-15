@@ -5,6 +5,7 @@ import logging
 import random
 import re
 import sqlite3
+import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -219,6 +220,66 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
 
 
 # --- SCORING ---
+# Hot-path constants — compiled / built once at import time rather than on
+# every score_job() call. Both are immutable; safe to share across calls.
+PERMANENT_RE = re.compile(r"(?<![\w-])(?:permanent|substantive)\b", re.IGNORECASE)
+
+# Keys are matched as substrings against ``full_text`` (lowercased title +
+# description). Short acronyms are wrapped in spaces to avoid matching inside
+# unrelated words (e.g. " ofs " not "ofs", to keep "officers" / "offset" out;
+# " tne " not "tne", to keep "witness" / "fitness" out).
+EXPERTISE_MAP = {
+    "psf": "PSF",
+    "ntfs": "NTFS",
+    "fellowship": "Fellowship",
+    "teaching excellence framework": "TEF",
+    "tef": "TEF",
+    "ref ": "REF",
+    "accreditation": "Accreditation",
+    "quality assurance": "Quality Assurance",
+    "ai in education": "AI in Education",
+    "artificial intelligence": "AI Signal",
+    "benchmarking": "Benchmarking",
+    "governance": "Governance",
+    "student experience": "Student Experience",
+    "student success": "Student Success",
+    "student outcomes": "Student Outcomes",
+    "learning analytics": "Learning Analytics",
+    "micro-credential": "Micro-credentials",
+    "microcredential": "Micro-credentials",
+    "stackable": "Stackable Qualifications",
+    "transnational": "TNE",
+    " tne ": "TNE",
+    "widening participation": "Widening Participation",
+    "access and participation": "Widening Participation",
+    " ofs ": "OfS",
+    "office for students": "OfS",
+    "b3 metric": "B3 Metrics",
+    " b3 ": "B3 Metrics",
+    "leadership development": "Leadership Development",
+    "professional development": "Professional Development",
+    "aurora": "Aurora",
+    "athena swan": "Athena Swan",
+    "edtech": "EdTech",
+    "ed tech": "EdTech",
+    "digital learning": "Digital Learning",
+    "online learning": "Digital Learning",
+    "learning gain": "Learning Gain",
+    "employability": "Employability",
+    "graduate outcomes": "Graduate Outcomes",
+    "portfolio review": "Portfolio Review",
+    "validation panel": "Validation",
+    "lifelong learning": "Lifelong Learning",
+    "knowledge exchange": "Knowledge Exchange",
+    "edi ": "EDI",
+    " edi,": "EDI",
+    "equality, diversity": "EDI",
+    "equality diversity": "EDI",
+}
+# Cap surfaced expertise tags so the report's chip list stays readable.
+MAX_EXPERTISE_TAGS = 3
+
+
 def score_job(job: Job, config: Dict) -> Job:
     w = config["weights"]
     full_text = f"{job.title} {job.description}".lower()
@@ -241,10 +302,7 @@ def score_job(job: Job, config: Dict) -> Job:
 
     # 3. Permanent vs interim
     senior_match = "Executive Level" in job.match_reasons or "Director Level" in job.match_reasons
-    # Use word-boundary regex so "non-permanent" / "non-substantive" don't trip
-    # the +permanent_signal bonus via simple substring match.
-    permanent_re = re.compile(r"(?<![\w-])(?:permanent|substantive)\b", re.IGNORECASE)
-    if permanent_re.search(full_text):
+    if PERMANENT_RE.search(full_text):
         job.score += w["permanent_signal"]
         job.match_reasons.append("Permanent")
     elif any(t in full_text for t in ["interim", "fixed-term", "fixed term"]):
@@ -254,67 +312,20 @@ def score_job(job: Job, config: Dict) -> Job:
             job.score -= 15
             job.match_reasons.append("Short-term Contract")
 
-    # 4. Sector expertise
-    # Keys are matched as substrings against ``full_text`` (lowercased title +
-    # description). Short acronyms are wrapped in spaces to avoid matching
-    # inside unrelated words (e.g. " ofs " not "ofs", to keep "officers"
-    # / "offset" out; " tne " not "tne", to keep "witness" / "fitness" out).
-    expertise_map = {
-        "psf": "PSF",
-        "ntfs": "NTFS",
-        "fellowship": "Fellowship",
-        "teaching excellence framework": "TEF",
-        "tef": "TEF",
-        "ref ": "REF",
-        "accreditation": "Accreditation",
-        "quality assurance": "Quality Assurance",
-        "ai in education": "AI in Education",
-        "artificial intelligence": "AI Signal",
-        "benchmarking": "Benchmarking",
-        "governance": "Governance",
-        # CV-derived expertise signals — Charles's track record sits heavily
-        # in student outcomes, micro-credentials, TNE, EdTech, leadership
-        # development, and sector-policy work. Without these signals, HE
-        # roles in those areas were quietly scoring under the threshold.
-        "student experience": "Student Experience",
-        "student success": "Student Success",
-        "student outcomes": "Student Outcomes",
-        "learning analytics": "Learning Analytics",
-        "micro-credential": "Micro-credentials",
-        "microcredential": "Micro-credentials",
-        "stackable": "Stackable Qualifications",
-        "transnational": "TNE",
-        " tne ": "TNE",
-        "widening participation": "Widening Participation",
-        "access and participation": "Widening Participation",
-        " ofs ": "OfS",
-        "office for students": "OfS",
-        "b3 metric": "B3 Metrics",
-        " b3 ": "B3 Metrics",
-        "leadership development": "Leadership Development",
-        "professional development": "Professional Development",
-        "aurora": "Aurora",
-        "athena swan": "Athena Swan",
-        "edtech": "EdTech",
-        "ed tech": "EdTech",
-        "digital learning": "Digital Learning",
-        "online learning": "Digital Learning",
-        "learning gain": "Learning Gain",
-        "employability": "Employability",
-        "graduate outcomes": "Graduate Outcomes",
-        "portfolio review": "Portfolio Review",
-        "validation panel": "Validation",
-        "lifelong learning": "Lifelong Learning",
-        "knowledge exchange": "Knowledge Exchange",
-        "edi ": "EDI",
-        " edi,": "EDI",
-        "equality, diversity": "EDI",
-        "equality diversity": "EDI",
-    }
-    matched_expertise = [label for key, label in expertise_map.items() if key in full_text]
+    # 4. Sector expertise — score the bonus once, surface up to MAX_EXPERTISE_TAGS
+    # labels so the report's chip list reflects the role's full scope (e.g.
+    # "Student Outcomes" + "Learning Analytics" + "EdTech") instead of one.
+    # De-duplicate while preserving insertion order in case multiple keys map
+    # to the same label (e.g. micro-credential / microcredential → Micro-credentials).
+    matched_expertise = []
+    seen_labels = set()
+    for key, label in EXPERTISE_MAP.items():
+        if key in full_text and label not in seen_labels:
+            matched_expertise.append(label)
+            seen_labels.add(label)
     if matched_expertise:
         job.score += w["expertise_signal"]
-        job.match_reasons.append(matched_expertise[0])  # Report the first match; score awarded once
+        job.match_reasons.extend(matched_expertise[:MAX_EXPERTISE_TAGS])
 
     # 5. Geography (HE profile only)
     if w.get("geography_bonus"):
@@ -398,6 +409,9 @@ class Database:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
         if "last_seen_at" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TEXT")
+        # find_canonical/touch_seen filter by url — without an index SQLite
+        # scans the table on every lookup.
+        self.conn.execute("CREATE INDEX IF NOT EXISTS jobs_url_idx ON jobs(url)")
         self.conn.commit()
 
     def find_canonical(self, title: str, url: str) -> bool:
@@ -517,6 +531,35 @@ async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> Optional[http
 
 
 # --- REPORTING ---
+DESCRIPTION_EXCERPT_CHARS = 400
+
+
+def _summarise_rows(rows: list) -> str:
+    """One-line breakdown of the report contents for the header.
+
+    Counts roles by the most informative tag present in their reasons. Tags
+    are mutually exclusive in scoring (exec > director > other), so a role
+    falls into exactly one bucket.
+    """
+    exec_count = director_count = other_count = 0
+    for r in rows:
+        reasons = (r["reasons"] or "").lower()
+        if "executive level" in reasons:
+            exec_count += 1
+        elif "director level" in reasons:
+            director_count += 1
+        else:
+            other_count += 1
+    parts = []
+    if exec_count:
+        parts.append(f"{exec_count} Executive")
+    if director_count:
+        parts.append(f"{director_count} Director")
+    if other_count:
+        parts.append(f"{other_count} Other")
+    return " · ".join(parts) if parts else "no roles"
+
+
 def generate_html_report(rows: list, title: str, filename: str):
     status_colours = {
         "new": "#e3f2fd",
@@ -539,41 +582,68 @@ def generate_html_report(rows: list, title: str, filename: str):
         url = r["url"] or ""
         # Only allow http(s) URLs in the View Opening link to prevent javascript: injection
         scheme = urlparse(url).scheme.lower()
-        safe_url = html.escape(url, quote=True) if scheme in ("http", "https") else "#"
+        url_is_safe = scheme in ("http", "https")
+        safe_url = html.escape(url, quote=True) if url_is_safe else "#"
 
         full_description = r["description"] or ""
-        description_excerpt = full_description[:400]
-        # Only show the ellipsis if we actually truncated the description.
-        ellipsis = "..." if len(full_description) > 400 else ""
+        # textwrap.shorten preserves word boundaries and handles the ellipsis,
+        # so descriptions never cut mid-word. Replace newlines first so the
+        # collapsing-whitespace behaviour produces a clean single-line excerpt.
+        description_excerpt = textwrap.shorten(
+            (full_description or "").replace("\n", " "),
+            width=DESCRIPTION_EXCERPT_CHARS,
+            placeholder="…",
+        )
 
         score_value = r["score"] if r["score"] is not None else 0
         score_display = (
             int(score_value) if float(score_value).is_integer() else round(score_value, 1)
         )
 
+        # Title/score row uses a 2-cell table rather than flexbox. Outlook on
+        # Windows renders email HTML through Word and ignores flexbox — the
+        # table form is the long-standing email-HTML compatibility pattern.
+        title_row = (
+            "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+            "border='0' style='border-collapse:collapse;'>"
+            "<tr>"
+            "<td style='vertical-align:top;'>"
+            f"<h3 style='margin:0 0 6px 0; color:#1a237e;'>{html.escape(r['title'] or '')}</h3>"
+            "</td>"
+            "<td style='vertical-align:top; text-align:right; white-space:nowrap;'>"
+            f"<span style='font-size:0.8em; background:#1a237e; color:white; "
+            f"padding:3px 8px; border-radius:4px;'>Score: {score_display}</span>"
+            "</td>"
+            "</tr></table>"
+        )
+
+        if url_is_safe:
+            cta_html = (
+                f"<a href=\"{safe_url}\" target=\"_blank\" rel=\"noopener noreferrer\" "
+                "style='background:#1a237e; color:white; padding:10px 20px; "
+                "text-decoration:none; border-radius:6px; font-weight:bold; "
+                "display:inline-block;'>View Opening</a>"
+            )
+        else:
+            cta_html = (
+                "<span style='background:#eeeeee; color:#888; padding:10px 20px; "
+                "border-radius:6px; font-weight:bold; display:inline-block;'>"
+                "Source link unavailable</span>"
+            )
+
         cards.append(f"""
             <div style="border:1px solid #e0e0e0; padding:20px; margin-bottom:20px;
                         border-radius:12px; background:{status_bg};
                         box-shadow:0 2px 4px rgba(0,0,0,0.05); font-family:sans-serif;">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                    <h3 style="margin:0 0 6px 0; color:#1a237e;">{html.escape(r['title'] or '')}</h3>
-                    <span style="font-size:0.8em; background:#1a237e; color:white;
-                                 padding:3px 8px; border-radius:4px; white-space:nowrap;">
-                        Score: {score_display}
-                    </span>
-                </div>
+                {title_row}
                 <p style="margin:0 0 10px 0;"><strong>{html.escape(r['employer'] or '')}</strong></p>
                 <div style="margin-bottom:12px;">{reasons_html}</div>
                 <p style="color:#424242; font-size:0.9em; line-height:1.5; margin-bottom:15px;">
-                    {html.escape(description_excerpt)}{ellipsis}
+                    {html.escape(description_excerpt)}
                 </p>
-                <div style="display:flex; gap:10px; align-items:center;">
-                    <a href="{safe_url}" target="_blank" rel="noopener noreferrer"
-                       style="background:#1a237e; color:white; padding:10px 20px;
-                              text-decoration:none; border-radius:6px; font-weight:bold;">
-                        View Opening
-                    </a>
-                    <span style="font-size:0.8em; color:#666;">
+                <div>
+                    {cta_html}
+                    <span style="font-size:0.8em; color:#666; margin-left:10px;">
                         First seen: {html.escape((r['first_seen_at'] or '')[:10])}
                         &nbsp;|&nbsp; Status: <strong>{html.escape(status)}</strong>
                     </span>
@@ -584,8 +654,10 @@ def generate_html_report(rows: list, title: str, filename: str):
         "<p style='font-family:sans-serif;'>No opportunities met the suitability threshold.</p>"
     )
     safe_title = html.escape(title)
+    summary_line = _summarise_rows(rows)
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(f"""<html>
+        f.write(f"""<!DOCTYPE html>
+<html lang="en">
 <head><meta charset="utf-8"><title>{safe_title}</title></head>
 <body style='max-width:860px; margin:auto; padding:40px; background:#f8f9fa;'>
     <h2 style='font-family:sans-serif; color:#1a237e;
@@ -594,13 +666,111 @@ def generate_html_report(rows: list, title: str, filename: str):
     </h2>
     <p style='font-family:sans-serif; color:#666; font-size:0.9em;'>
         Generated: {datetime.now(timezone.utc).strftime('%d %B %Y %H:%M UTC')}
-        &nbsp;|&nbsp; {len(rows)} role(s) listed
+        &nbsp;|&nbsp; {len(rows)} role(s) listed &nbsp;|&nbsp; {html.escape(summary_line)}
     </p>
     {content}
 </body></html>""")
 
 
 # --- EXECUTION ---
+# Maximum concurrent detail-page fetches per source. Keeps us polite to a
+# single origin while still benefiting from async I/O instead of the previous
+# strict 1.5s-per-fetch serial pacing.
+DETAIL_FETCH_CONCURRENCY = 3
+# Light jitter between detail fetches within a source so we don't burst even
+# at the semaphore limit.
+DETAIL_FETCH_JITTER = (0.3, 0.8)
+
+
+async def _scrape_source(
+    client: httpx.AsyncClient,
+    src: Dict,
+    cfg: Dict,
+    db: Database,
+    dry_run: bool,
+) -> List[Job]:
+    """Scrape one source: fetch listing, filter, fetch details concurrently, score.
+
+    Returns the list of *new* scored jobs ready for the caller to upsert. DB
+    writes happen on the caller side so all upserts run serially on the single
+    SQLite connection — coroutines do the I/O, the caller does the writes.
+    """
+    listing_resp = await fetch_with_retry(client, src["url"])
+    if listing_resp is None:
+        logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
+        return []
+
+    soup = BeautifulSoup(listing_resp.text, "lxml")
+    links = list(soup.select(src["selector"]))
+    # Per-source match count surfaces dead selectors passively in the log —
+    # any source returning 0 matches across consecutive runs is a candidate
+    # for removal from the YAML.
+    logger.info(f"{src['name']}: {len(links)} link(s) matched selector")
+    if not links:
+        return []
+
+    candidates = []
+    for a in links:
+        raw_title = a.get_text(" ").strip()
+        href = a.get("href", "")
+        if not href or len(raw_title) < 10:
+            continue
+        url = urljoin(src["url"], href)
+
+        if db.find_canonical(raw_title, url):
+            # Known URL — refresh last_seen_at so stale-marking only fires
+            # when the listing actually disappears.
+            if not dry_run:
+                db.touch_seen(url)
+            continue
+
+        if not any(t in raw_title.lower() for t in cfg["title_gate"]):
+            continue
+
+        candidates.append((raw_title, url))
+
+    if not candidates:
+        return []
+
+    sem = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
+
+    async def fetch_and_score(raw_title: str, url: str) -> Optional[Job]:
+        async with sem:
+            await asyncio.sleep(random.uniform(*DETAIL_FETCH_JITTER))
+            det = await fetch_with_retry(client, url)
+            if det is None:
+                return None
+            job = Job(
+                source=src["name"],
+                title=raw_title,
+                employer=src["name"],
+                url=url,
+                fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+            job.description = extract_description(det.text)
+            job.employer = extract_employer(raw_title, job.description, src["name"])
+            job.fingerprint = hashlib.sha256(
+                f"{raw_title}{url}".encode()
+            ).hexdigest()
+            return score_job(job, cfg)
+
+    results = await asyncio.gather(
+        *[fetch_and_score(t, u) for t, u in candidates],
+        return_exceptions=True,
+    )
+
+    scored: List[Job] = []
+    for r in results:
+        if isinstance(r, Exception):
+            logger.error(f"Error processing candidate in {src['name']}: {r}")
+            continue
+        if r is None:
+            continue
+        if r.score >= cfg["filters"]["minimum_score"]:
+            scored.append(r)
+    return scored
+
+
 async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
     cfg = PROFILES[profile_key]
     if dry_run:
@@ -611,61 +781,25 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True
         ) as client:
-            for i, src in enumerate(cfg["sources"]):
-                if i > 0:
-                    await asyncio.sleep(2.0)
-                try:
-                    resp = await fetch_with_retry(client, src["url"])
-                    if resp is None:
-                        continue
+            # Sources hit different origins, so we run them concurrently;
+            # per-source semaphore inside _scrape_source keeps detail-fetch
+            # load polite per host. return_exceptions so one broken source
+            # cannot bring down the whole run.
+            source_results = await asyncio.gather(
+                *[_scrape_source(client, src, cfg, db, dry_run) for src in cfg["sources"]],
+                return_exceptions=True,
+            )
 
-                    soup = BeautifulSoup(resp.text, "lxml")
-
-                    for a in soup.select(src["selector"]):
-                        raw_title = a.get_text(" ").strip()
-                        href = a.get("href", "")
-                        if not href or len(raw_title) < 10:
-                            continue
-                        url = urljoin(src["url"], href)
-
-                        if db.find_canonical(raw_title, url):
-                            # Known URL — refresh last_seen_at so stale-marking
-                            # only fires when the listing actually disappears.
-                            if not dry_run:
-                                db.touch_seen(url)
-                            continue
-
-                        if not any(t in raw_title.lower() for t in cfg["title_gate"]):
-                            continue
-
-                        await asyncio.sleep(1.5)
-                        det = await fetch_with_retry(client, url)
-                        if det is None:
-                            continue
-
-                        job = Job(
-                            source=src["name"],
-                            title=raw_title,
-                            employer=src["name"],
-                            url=url,
-                            fetched_at=datetime.now(timezone.utc).isoformat(),
-                        )
-                        job.description = extract_description(det.text)
-                        job.employer = extract_employer(raw_title, job.description, src["name"])
-                        job.fingerprint = hashlib.sha256(
-                            f"{raw_title}{url}".encode()
-                        ).hexdigest()
-
-                        job = score_job(job, cfg)
-                        if job.score >= cfg["filters"]["minimum_score"]:
-                            if dry_run:
-                                logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")
-                            else:
-                                db.upsert_job(job)
-                                logger.info(f"Saved: [{job.score}] {job.title} @ {job.employer}")
-
-                except Exception as e:
-                    logger.error(f"Error scraping {src['name']}: {e}")
+        for src, result in zip(cfg["sources"], source_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error scraping {src['name']}: {result}")
+                continue
+            for job in result:
+                if dry_run:
+                    logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")
+                else:
+                    db.upsert_job(job)
+                    logger.info(f"Saved: [{job.score}] {job.title} @ {job.employer}")
 
         if dry_run:
             return
