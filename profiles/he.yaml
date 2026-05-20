@@ -3,7 +3,7 @@ db_path: jobs_he.db
 output_prefix: ""
 
 filters:
-  minimum_score: 25
+  minimum_score: 20
   # Salary signal: stated salary >= target awards +15; stated salary below
   # floor penalises -15; no stated salary is treated as neutral. Most senior
   # search-firm listings omit salary, so this is a tiebreaker, not a gate.
@@ -111,6 +111,26 @@ director_titles:
   - director of partnerships
   - director of policy
   - director of governance
+  # Common university-administration directorships. Previously these scored 0
+  # from titles and depended entirely on the permanent/expertise/geography
+  # signals to clear the minimum_score floor — many senior-search listings
+  # omit "permanent" explicitly, so realistic Director-of-X roles were dropped.
+  - director of marketing
+  - director of communications
+  - director of external relations
+  - director of people
+  - director of human resources
+  - director of hr
+  - director of finance
+  - director of operations
+  - director of it
+  - director of digital
+  - director of information
+  - chief operating officer
+  - chief information officer
+  - chief financial officer
+  - university secretary
+  - company secretary
 
 title_gate:
   - director
@@ -127,21 +147,34 @@ title_gate:
   # "Pro Vice Chancellor" (common on jobs.ac.uk and some exec-search firms)
   # would be dropped at the gate before the description is even fetched.
   - vice chancellor
+  # "University Secretary" / "Company Secretary" are common UK university
+  # leadership roles that would otherwise be dropped — none of the other
+  # gate terms match.
+  - secretary
 
-# Narrow technical-IC roles only. The bare term "software" was previously
-# blanket-excluded, which killed every legitimate EdTech / digital-learning
-# leadership role since their descriptions mention software. Use specific
-# job-title fragments instead.
+# Narrow technical-IC and operational roles only. Bare terms like "developer",
+# "estates", "facilities", "security" were previously blanket-excluded, which
+# killed legitimate leadership roles whose JDs simply *mention* working with
+# the Estates team, data security, or curriculum developers. Use specific
+# job-title fragments instead so the substring match against title+description
+# only fires when the role itself is operational/IC, not when it's adjacent.
 exclusion_terms:
   - software developer
   - software engineer
   - software architect
+  - curriculum developer
+  - policy developer
   - nurse
   - warehouse
-  - developer
   - technician
-  - estates
-  - facilities
+  - director of estates
+  - head of estates
+  - estates manager
+  - director of facilities
+  - head of facilities
+  - facilities manager
+  - director of security
+  - head of security
+  - security officer
   - catering
   - porter
-  - security
