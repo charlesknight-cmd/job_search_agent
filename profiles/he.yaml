@@ -9,6 +9,11 @@ filters:
   # search-firm listings omit salary, so this is a tiebreaker, not a gate.
   salary_floor: 60000
   salary_target: 65000
+  # HE senior leadership is a lower-cadence market than charity — roles are
+  # advertised once and recruited over 4-8 weeks. A 24h window leaves most
+  # daily reports legitimately empty between waves. Widening to 72h smooths
+  # this without making the email feel stale (weekly digest is still 168h).
+  daily_window_hours: 72
 
 sources:
   - name: jobs.ac.uk
@@ -25,31 +30,34 @@ sources:
   - name: Perrett Laver
     url: https://candidates.perrettlaver.com/vacancies/
     selector: "a[href*='/vacancies/']"
-  # New HE exec-search firms — selectors are best-guess based on each site's
-  # public-facing listings page; verify on first run and remove any that
-  # return zero matches (likely JS-rendered, like Odgers Berndtson).
-  # Saxton Bampfylde — appointments page lists role cards; href pattern is
-  # typically /appointment/<slug> on the public site.
+  # New HE exec-search firms — selectors are defensive multi-pattern OR-lists
+  # because each firm's URL slug is a guess. Watch the per-source panel at
+  # the bottom of each email: any source showing 0 links across consecutive
+  # runs is likely JS-rendered (like Odgers Berndtson) and can be dropped.
+  # Saxton Bampfylde — try the obvious /appointment/, /appointments/ slugs.
   - name: Saxton Bampfylde
     url: https://www.saxbam.com/appointments/
-    selector: "a[href*='/appointment/']"
-  # Anderson Quigley — opportunities page; href pattern targets vacancy links.
+    selector: "a[href*='/appointment/'], a[href*='/appointments/']"
+  # Anderson Quigley — broaden to opportunity slug too, in case singular form
+  # is used per-vacancy.
   - name: Anderson Quigley
     url: https://www.andersonquigley.com/opportunities/
-    selector: "a[href*='/opportunities/']"
-  # Dixon Walter — small WordPress site, vacancy detail pages live under
-  # /vacancy/<slug>; this selector targets the link from the listings index.
+    selector: "a[href*='/opportunity/'], a[href*='/opportunities/']"
+  # Dixon Walter — small WordPress site; try both singular vacancy and
+  # generic position slugs.
   - name: Dixon Walter
     url: https://www.dixonwalter.co.uk/vacancies/
-    selector: "a[href*='/vacancy/']"
-  # Veredus — public-sector exec search; jobs page server-rendered.
+    selector: "a[href*='/vacancy/'], a[href*='/position/']"
+  # Veredus — public-sector exec search; /job/ and /jobs/ are both plausible
+  # detail-page patterns on WordPress installations.
   - name: Veredus
     url: https://www.veredus.co.uk/jobs/
-    selector: "a[href*='/job/']"
-  # Minerva Search — boutique HE/charity exec search; positions page.
+    selector: "a[href*='/job/'], a[href*='/jobs/']"
+  # Minerva Search — boutique HE/charity exec search; try position/positions
+  # plus a generic search slug fallback.
   - name: Minerva Search
     url: https://minervasearch.com/positions/
-    selector: "a[href*='/position/']"
+    selector: "a[href*='/position/'], a[href*='/positions/'], a[href*='/search/']"
 
 weights:
   executive_bonus: 50
