@@ -61,6 +61,22 @@ class Job:
     fingerprint: str = ""
 
 
+@dataclass
+class SourceStats:
+    """Per-source funnel counts surfaced in the email footer.
+
+    A source with ``links_matched == 0`` across consecutive runs is a strong
+    signal that its selector is broken or the page is JS-rendered. A source
+    with healthy ``links_matched`` but ``candidates == 0`` usually means the
+    title gate is dropping everything (page is generic content, not vacancies).
+    """
+    name: str
+    links_matched: int = 0
+    candidates: int = 0
+    new_scored: int = 0
+    listing_failed: bool = False
+
+
 # --- CONFIGURATION ---
 # Search profiles live in YAML files under ``profiles/`` so non-Python users
 # can edit search parameters without touching this module.
@@ -560,7 +576,57 @@ def _summarise_rows(rows: list) -> str:
     return " · ".join(parts) if parts else "no roles"
 
 
-def generate_html_report(rows: list, title: str, filename: str):
+def _render_source_panel(source_stats: List[SourceStats]) -> str:
+    """Render the per-source funnel table for the email footer.
+
+    Three columns per row: links matched on the listing page → candidates
+    passing the title gate → new jobs that cleared the score threshold. Sources
+    showing 0 links across consecutive runs are highlighted so the maintainer
+    can quickly spot broken selectors (typically JS-rendered pages).
+    """
+    if not source_stats:
+        return ""
+    rows = []
+    for s in source_stats:
+        if s.listing_failed:
+            status_cell = "<span style='color:#c62828;'>fetch failed</span>"
+        elif s.links_matched == 0:
+            status_cell = "<span style='color:#c62828;'>0 — selector dry?</span>"
+        else:
+            status_cell = f"{s.links_matched}"
+        rows.append(
+            "<tr>"
+            f"<td style='padding:4px 10px;'>{html.escape(s.name)}</td>"
+            f"<td style='padding:4px 10px; text-align:right;'>{status_cell}</td>"
+            f"<td style='padding:4px 10px; text-align:right;'>{s.candidates}</td>"
+            f"<td style='padding:4px 10px; text-align:right;'>{s.new_scored}</td>"
+            "</tr>"
+        )
+    return (
+        "<div style='font-family:sans-serif; margin-top:30px; padding:15px;"
+        " background:#ffffff; border:1px solid #e0e0e0; border-radius:8px;"
+        " font-size:0.85em; color:#424242;'>"
+        "<p style='margin:0 0 8px 0; font-weight:bold; color:#1a237e;'>"
+        "Per-source funnel (links → gate-passed → new)</p>"
+        "<table style='border-collapse:collapse; width:100%;'>"
+        "<thead><tr style='background:#f5f5f5;'>"
+        "<th style='padding:4px 10px; text-align:left;'>Source</th>"
+        "<th style='padding:4px 10px; text-align:right;'>Links</th>"
+        "<th style='padding:4px 10px; text-align:right;'>Candidates</th>"
+        "<th style='padding:4px 10px; text-align:right;'>New</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table></div>"
+    )
+
+
+def generate_html_report(
+    rows: list,
+    title: str,
+    filename: str,
+    source_stats: Optional[List[SourceStats]] = None,
+    window_hours: Optional[int] = None,
+):
     status_colours = {
         "new": "#e3f2fd",
         "interested": "#e8f5e9",
@@ -655,6 +721,13 @@ def generate_html_report(rows: list, title: str, filename: str):
     )
     safe_title = html.escape(title)
     summary_line = _summarise_rows(rows)
+    window_label = ""
+    if window_hours:
+        if window_hours >= 24 and window_hours % 24 == 0:
+            window_label = f" &nbsp;|&nbsp; window: last {window_hours // 24} day(s)"
+        else:
+            window_label = f" &nbsp;|&nbsp; window: last {window_hours}h"
+    panel_html = _render_source_panel(source_stats or [])
     with open(filename, "w", encoding="utf-8") as f:
         f.write(f"""<!DOCTYPE html>
 <html lang="en">
@@ -666,9 +739,10 @@ def generate_html_report(rows: list, title: str, filename: str):
     </h2>
     <p style='font-family:sans-serif; color:#666; font-size:0.9em;'>
         Generated: {datetime.now(timezone.utc).strftime('%d %B %Y %H:%M UTC')}
-        &nbsp;|&nbsp; {len(rows)} role(s) listed &nbsp;|&nbsp; {html.escape(summary_line)}
+        &nbsp;|&nbsp; {len(rows)} role(s) listed &nbsp;|&nbsp; {html.escape(summary_line)}{window_label}
     </p>
     {content}
+    {panel_html}
 </body></html>""")
 
 
@@ -688,26 +762,32 @@ async def _scrape_source(
     cfg: Dict,
     db: Database,
     dry_run: bool,
-) -> List[Job]:
+) -> tuple:
     """Scrape one source: fetch listing, filter, fetch details concurrently, score.
 
-    Returns the list of *new* scored jobs ready for the caller to upsert. DB
-    writes happen on the caller side so all upserts run serially on the single
-    SQLite connection — coroutines do the I/O, the caller does the writes.
+    Returns ``(jobs, stats)`` where ``jobs`` is the list of *new* scored jobs
+    ready for the caller to upsert and ``stats`` is a :class:`SourceStats`
+    capturing the funnel counts for the email footer panel. DB writes happen
+    on the caller side so all upserts run serially on the single SQLite
+    connection — coroutines do the I/O, the caller does the writes.
     """
+    stats = SourceStats(name=src["name"])
+
     listing_resp = await fetch_with_retry(client, src["url"])
     if listing_resp is None:
+        stats.listing_failed = True
         logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
-        return []
+        return [], stats
 
     soup = BeautifulSoup(listing_resp.text, "lxml")
     links = list(soup.select(src["selector"]))
+    stats.links_matched = len(links)
     # Per-source match count surfaces dead selectors passively in the log —
     # any source returning 0 matches across consecutive runs is a candidate
     # for removal from the YAML.
     logger.info(f"{src['name']}: {len(links)} link(s) matched selector")
     if not links:
-        return []
+        return [], stats
 
     candidates = []
     for a in links:
@@ -729,8 +809,9 @@ async def _scrape_source(
 
         candidates.append((raw_title, url))
 
+    stats.candidates = len(candidates)
     if not candidates:
-        return []
+        return [], stats
 
     sem = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
 
@@ -768,7 +849,8 @@ async def _scrape_source(
             continue
         if r.score >= cfg["filters"]["minimum_score"]:
             scored.append(r)
-    return scored
+    stats.new_scored = len(scored)
+    return scored, stats
 
 
 async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
@@ -790,11 +872,15 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
                 return_exceptions=True,
             )
 
+        source_stats: List[SourceStats] = []
         for src, result in zip(cfg["sources"], source_results):
             if isinstance(result, Exception):
                 logger.error(f"Error scraping {src['name']}: {result}")
+                source_stats.append(SourceStats(name=src["name"], listing_failed=True))
                 continue
-            for job in result:
+            jobs, stats = result
+            source_stats.append(stats)
+            for job in jobs:
                 if dry_run:
                     logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")
                 else:
@@ -808,13 +894,19 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
         if stale_count:
             logger.info(f"Marked {stale_count} job(s) as stale (not seen in {STALE_AFTER_HOURS}h)")
 
-        window_hours = 168 if weekly else 24
+        # Daily window is profile-configurable so HE (a lower-cadence market
+        # where roles are advertised once and recruited over 4-8 weeks) can use
+        # a wider 72h window without flooding the higher-cadence charity feed.
+        daily_window = cfg["filters"].get("daily_window_hours", 24)
+        window_hours = 168 if weekly else daily_window
         recent = db.get_recent(window_hours, cfg["filters"]["minimum_score"])
         fname = f"{cfg['output_prefix']}{'weekly_digest' if weekly else 'new_jobs_report'}.html"
         generate_html_report(
             recent,
             f"{'Weekly' if weekly else 'Daily'} {cfg['label']} Report",
-            fname
+            fname,
+            source_stats=source_stats,
+            window_hours=window_hours,
         )
         logger.info(f"Report written: {fname} ({len(recent)} roles)")
 
