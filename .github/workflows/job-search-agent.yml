@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Send HE Email
-        if: success()
+        if: success() && hashFiles('new_jobs_report.html') != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -114,7 +114,7 @@ jobs:
           fi
 
       - name: Send Charity Email
-        if: success()
+        if: success() && hashFiles('charity_new_jobs_report.html') != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -181,7 +181,7 @@ jobs:
           fi
 
       - name: Send Sector Email
-        if: success()
+        if: success() && hashFiles('sector_new_jobs_report.html') != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
