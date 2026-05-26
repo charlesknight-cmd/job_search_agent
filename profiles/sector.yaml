@@ -3,8 +3,8 @@ db_path: sector_bodies_jobs.db
 output_prefix: sector_
 filters:
   minimum_score: 20
-  salary_floor: 60000
-  salary_target: 65000
+  salary_floor: 80000
+  salary_target: 100000
 sources:
   - name: jobs.ac.uk Professional
     url: https://www.jobs.ac.uk/search/director
@@ -28,6 +28,7 @@ weights:
   permanent_signal: 20
   expertise_signal: 20
   sector_fit_bonus: 20
+  salary_bonus: 30
   exclusion_penalty: -60
 exec_titles:
   - chief executive

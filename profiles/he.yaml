@@ -4,11 +4,14 @@ output_prefix: ""
 
 filters:
   minimum_score: 20
-  # Salary signal: stated salary >= target awards +15; stated salary below
-  # floor penalises -15; no stated salary is treated as neutral. Most senior
-  # search-firm listings omit salary, so this is a tiebreaker, not a gate.
-  salary_floor: 60000
-  salary_target: 65000
+  # Salary signal: stated salary >= target awards +salary_bonus; stated salary
+  # below floor applies -salary_bonus; no stated salary is treated as neutral.
+  # Most senior search-firm listings omit salary, so this is a tiebreaker.
+  # Thresholds reflect the actual senior HE leadership market — PVC roles
+  # £130k+, Director-of-X at Russell Group £80-120k. A £75k role is not the
+  # signal we want to chase.
+  salary_floor: 80000
+  salary_target: 100000
   # HE senior leadership is a lower-cadence market than charity — roles are
   # advertised once and recruited over 4-8 weeks. A 24h window leaves most
   # daily reports legitimately empty between waves. Widening to 72h smooths
@@ -65,6 +68,10 @@ weights:
   permanent_signal: 25
   expertise_signal: 20
   geography_bonus: 20
+  # Stronger signal now that the floor/target reflect the real senior market.
+  # A role advertising £100k+ is meaningfully different from one advertising
+  # £75k, so the gap between Salary Match and Below Target should weigh in.
+  salary_bonus: 30
   exclusion_penalty: -60
 
 exec_titles:

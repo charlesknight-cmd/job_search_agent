@@ -59,6 +59,7 @@ class Job:
     match_reasons: List[str] = field(default_factory=list)
     fetched_at: str = ""
     fingerprint: str = ""
+    salary: Optional[int] = None  # Highest plausible GBP figure extracted, or None
 
 
 @dataclass
@@ -374,6 +375,7 @@ def score_job(job: Job, config: Dict) -> Job:
     # Title is rarely where salary is stated, but include it cheaply for the
     # occasional "Director (£90k)" style listing.
     salary = extract_salary(f"{job.title} {job.description}")
+    job.salary = salary
     if salary is not None:
         if salary >= salary_target:
             job.score += salary_bonus
@@ -414,7 +416,8 @@ class Database:
                 fetched_at TEXT,
                 first_seen_at TEXT,
                 last_seen_at TEXT,
-                status TEXT DEFAULT 'new'
+                status TEXT DEFAULT 'new',
+                salary INTEGER
             )
         """)
         cursor = self.conn.execute("PRAGMA table_info(jobs)")
@@ -425,6 +428,8 @@ class Database:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
         if "last_seen_at" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TEXT")
+        if "salary" not in cols:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN salary INTEGER")
         # find_canonical/touch_seen filter by url — without an index SQLite
         # scans the table on every lookup.
         self.conn.execute("CREATE INDEX IF NOT EXISTS jobs_url_idx ON jobs(url)")
@@ -443,17 +448,18 @@ class Database:
     def upsert_job(self, job: Job):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute("""
-            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at, last_seen_at, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at, last_seen_at, status, salary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
                 score = excluded.score,
                 reasons = excluded.reasons,
                 fetched_at = excluded.fetched_at,
-                last_seen_at = excluded.last_seen_at
+                last_seen_at = excluded.last_seen_at,
+                salary = excluded.salary
         """, (
             job.fingerprint, job.title, job.employer, job.url,
             job.description, job.score, ", ".join(job.match_reasons),
-            job.fetched_at, now, now
+            job.fetched_at, now, now, job.salary
         ))
         self.conn.commit()
 
@@ -697,12 +703,33 @@ def generate_html_report(
                 "Source link unavailable</span>"
             )
 
+        # Salary chip: only rendered when the scraper extracted a plausible
+        # GBP figure. The colour is keyed to the role's target — green at/above,
+        # amber if below the floor we care about — so triage is visual at a
+        # glance rather than requiring you to read the number.
+        salary_value = r["salary"] if "salary" in r.keys() else None
+        if salary_value:
+            if salary_value >= 100000:
+                salary_bg, salary_fg, salary_border = "#e8f5e9", "#1b5e20", "#a5d6a7"
+            elif salary_value >= 80000:
+                salary_bg, salary_fg, salary_border = "#fff8e1", "#bf6700", "#ffd180"
+            else:
+                salary_bg, salary_fg, salary_border = "#fce4ec", "#880e4f", "#f48fb1"
+            salary_html = (
+                f"<span style='background:{salary_bg}; color:{salary_fg}; "
+                f"padding:3px 10px; border-radius:4px; margin-left:8px; "
+                f"border:1px solid {salary_border}; font-size:0.85em; "
+                f"font-weight:bold;'>£{salary_value:,}</span>"
+            )
+        else:
+            salary_html = ""
+
         cards.append(f"""
             <div style="border:1px solid #e0e0e0; padding:20px; margin-bottom:20px;
                         border-radius:12px; background:{status_bg};
                         box-shadow:0 2px 4px rgba(0,0,0,0.05); font-family:sans-serif;">
                 {title_row}
-                <p style="margin:0 0 10px 0;"><strong>{html.escape(r['employer'] or '')}</strong></p>
+                <p style="margin:0 0 10px 0;"><strong>{html.escape(r['employer'] or '')}</strong>{salary_html}</p>
                 <div style="margin-bottom:12px;">{reasons_html}</div>
                 <p style="color:#424242; font-size:0.9em; line-height:1.5; margin-bottom:15px;">
                     {html.escape(description_excerpt)}

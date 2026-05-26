@@ -3,8 +3,8 @@ db_path: charity_jobs.db
 output_prefix: charity_
 filters:
   minimum_score: 20
-  salary_floor: 60000
-  salary_target: 65000
+  salary_floor: 80000
+  salary_target: 100000
 sources:
   - name: CharityJob CEO
     url: https://www.charityjob.co.uk/chief-executive-officer-jobs
@@ -36,6 +36,7 @@ weights:
   permanent_signal: 20
   expertise_signal: 15
   sector_fit_bonus: 15
+  salary_bonus: 30
   exclusion_penalty: -60
 exec_titles:
   - chief executive
