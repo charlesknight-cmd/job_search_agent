@@ -351,23 +351,23 @@ class TestSalaryScoring(unittest.TestCase):
 
     def test_salary_at_or_above_target_awards_bonus(self):
         job = self._score_with_desc(
-            "Permanent senior leadership role. Salary: £75,000 per annum."
+            "Permanent senior leadership role. Salary: £110,000 per annum."
         )
         self.assertIn("Salary Match", job.match_reasons)
         self.assertNotIn("Below Target", job.match_reasons)
 
     def test_salary_below_floor_penalised(self):
         job = self._score_with_desc(
-            "Permanent senior leadership role. Salary: £45,000 per annum."
+            "Permanent senior leadership role. Salary: £65,000 per annum."
         )
         self.assertIn("Below Target", job.match_reasons)
         self.assertNotIn("Salary Match", job.match_reasons)
 
     def test_salary_between_floor_and_target_neutral(self):
-        # £62k sits between floor (60k) and target (65k) — neither bonus
+        # £90k sits between floor (80k) and target (100k) — neither bonus
         # nor penalty.
         job = self._score_with_desc(
-            "Permanent senior leadership role. Salary: £62,000 per annum."
+            "Permanent senior leadership role. Salary: £90,000 per annum."
         )
         self.assertNotIn("Salary Match", job.match_reasons)
         self.assertNotIn("Below Target", job.match_reasons)
@@ -382,20 +382,34 @@ class TestSalaryScoring(unittest.TestCase):
         self.assertNotIn("Below Target", job.match_reasons)
 
     def test_salary_at_target_boundary_awards_bonus(self):
-        # Boundary: a salary exactly at the target (£65,000) earns the bonus.
+        # Boundary: a salary exactly at the target (£100,000) earns the bonus.
         job = self._score_with_desc(
-            "Permanent senior leadership role. Salary: £65,000."
+            "Permanent senior leadership role. Salary: £100,000."
         )
         self.assertIn("Salary Match", job.match_reasons)
 
     def test_salary_at_floor_boundary_neutral(self):
-        # Boundary: a salary exactly at the floor (£60,000) is *not* below it,
+        # Boundary: a salary exactly at the floor (£80,000) is *not* below it,
         # so no penalty — but it's also not at target, so no bonus.
         job = self._score_with_desc(
-            "Permanent senior leadership role. Salary: £60,000."
+            "Permanent senior leadership role. Salary: £80,000."
         )
         self.assertNotIn("Salary Match", job.match_reasons)
         self.assertNotIn("Below Target", job.match_reasons)
+
+    def test_salary_extracted_value_stored_on_job(self):
+        # score_job persists the extracted figure on the job so the report
+        # card can render it. Without this, the salary chip would only ever
+        # show for jobs that happened to score the bonus, not for jobs in
+        # the £80k-£100k neutral band that we still want to surface.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Salary: £95,000 per annum."
+        )
+        self.assertEqual(job.salary, 95000)
+
+    def test_salary_none_when_not_stated(self):
+        job = self._score_with_desc("Permanent senior leadership role.")
+        self.assertIsNone(job.salary)
 
 
 if __name__ == "__main__":
