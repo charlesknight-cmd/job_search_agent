@@ -466,10 +466,122 @@ class TestRemoteSalaryTradeoff(unittest.TestCase):
 
     def test_remote_role_at_target_still_awards_bonus(self):
         job = self._score_with_desc(
-            "Permanent senior leadership role. Remote. Salary: £110,000."
+            "Permanent senior leadership role. Fully remote. Salary: £110,000."
         )
         self.assertIn("Salary Match", job.match_reasons)
         self.assertNotIn("Remote OK", job.match_reasons)
+
+
+class TestRemoteDetectionPrecision(unittest.TestCase):
+    """Regression tests for false positives the original substring match
+    permitted. Each case used to wrongly trip is_remote=True, lowering the
+    salary floor for an onsite role.
+    """
+
+    def _score_with_desc(self, description: str) -> Job:
+        return score_job(_make_job("Director of Innovation", description), HE_CONFIG)
+
+    def test_hybrid_learning_does_not_count_as_remote(self):
+        # "Hybrid learning" describes teaching delivery mode, not the
+        # postholder's working pattern. Ubiquitous in HE descriptions.
+        job = self._score_with_desc(
+            "Permanent senior role at our London campus leading our "
+            "hybrid learning programme. Salary: £75,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_hybrid_event_does_not_count_as_remote(self):
+        job = self._score_with_desc(
+            "Senior leadership role based in Birmingham, overseeing our "
+            "annual hybrid event and conference series. Salary: £72,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_remote_possibility_does_not_count_as_remote(self):
+        # Idiomatic use of "remote" — describes a chance, not a location.
+        job = self._score_with_desc(
+            "Permanent senior role in our London office, with a remote "
+            "possibility of international travel. Salary: £73,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_remote_location_does_not_count_as_remote(self):
+        # "Remote location" = rural office, not remote working.
+        job = self._score_with_desc(
+            "Permanent senior role at our remote location in rural Devon. "
+            "Salary: £74,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_negated_remote_does_not_count_as_remote(self):
+        # Explicit negation: the substring is present but the meaning is opposite.
+        job = self._score_with_desc(
+            "Permanent senior role. This is not a remote role — five days "
+            "per week in our London office. Salary: £75,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_no_hybrid_working_does_not_count_as_remote(self):
+        job = self._score_with_desc(
+            "Permanent senior role at our Manchester campus. No hybrid "
+            "working available. Salary: £75,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_explicit_remote_working_still_detected(self):
+        # Positive control: the qualifier-based detection should still
+        # catch genuine remote working descriptions.
+        job = self._score_with_desc(
+            "Permanent senior role with remote working available. "
+            "Salary: £75,000."
+        )
+        self.assertIn("Remote OK", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
+
+    def test_work_from_home_still_detected(self):
+        job = self._score_with_desc(
+            "Permanent senior role with work from home arrangement. "
+            "Salary: £73,000."
+        )
+        self.assertIn("Remote OK", job.match_reasons)
+        self.assertNotIn("Below Target", job.match_reasons)
+
+
+class TestProfileFloorValidation(unittest.TestCase):
+    """Profile load-time guard against inverted floor configuration."""
+
+    def test_remote_floor_above_absolute_floor_rejected(self):
+        import tempfile
+        import textwrap
+        from pathlib import Path
+        from job_search_agent import load_profile
+
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "broken.yaml"
+            path.write_text(textwrap.dedent("""
+                label: Broken
+                db_path: broken.db
+                output_prefix: broken_
+                filters:
+                  minimum_score: 20
+                  salary_floor: 80000
+                  salary_target: 100000
+                  remote_salary_floor: 90000
+                sources: []
+                weights: {}
+                exec_titles: []
+                title_gate: []
+                exclusion_terms: []
+            """))
+            with self.assertRaises(ValueError) as ctx:
+                load_profile("broken", profiles_dir=Path(td))
+            self.assertIn("remote_salary_floor", str(ctx.exception))
 
 
 if __name__ == "__main__":
