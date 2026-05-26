@@ -241,6 +241,13 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
 # every score_job() call. Both are immutable; safe to share across calls.
 PERMANENT_RE = re.compile(r"(?<![\w-])(?:permanent|substantive)\b", re.IGNORECASE)
 
+# Substring match against lowercased title+description. Detects "largely
+# remote" working arrangements which justify a lower salary floor — a £75k
+# role you don't need to relocate for is materially different to £75k with
+# a daily commute. Kept deliberately tight: "remote" and "hybrid" are the
+# unambiguous signals; "flexible" alone is too vague to count.
+REMOTE_SIGNAL_TERMS = ("remote", "hybrid", "work from home", "wfh")
+
 # Keys are matched as substrings against ``full_text`` (lowercased title +
 # description). Short acronyms are wrapped in spaces to avoid matching inside
 # unrelated words (e.g. " ofs " not "ofs", to keep "officers" / "offset" out;
@@ -371,18 +378,31 @@ def score_job(job: Job, config: Dict) -> Job:
     filters = config.get("filters", {})
     salary_floor = filters.get("salary_floor", 60000)
     salary_target = filters.get("salary_target", 65000)
+    # remote_salary_floor defaults to salary_floor when not set, so profiles
+    # that haven't opted in keep the strict behaviour. Where it is set, a
+    # role with remote/hybrid signals only gets penalised if it falls below
+    # the lower bound — the standard "Below Target" tag still appears so the
+    # report makes the floor in play visible to the reader.
+    remote_salary_floor = filters.get("remote_salary_floor", salary_floor)
     salary_bonus = w.get("salary_bonus", 15)
     # Title is rarely where salary is stated, but include it cheaply for the
     # occasional "Director (£90k)" style listing.
     salary = extract_salary(f"{job.title} {job.description}")
     job.salary = salary
+    is_remote = any(t in full_text for t in REMOTE_SIGNAL_TERMS)
+    effective_floor = remote_salary_floor if is_remote else salary_floor
     if salary is not None:
         if salary >= salary_target:
             job.score += salary_bonus
             job.match_reasons.append("Salary Match")
-        elif salary < salary_floor:
+        elif salary < effective_floor:
             job.score -= salary_bonus
             job.match_reasons.append("Below Target")
+        elif is_remote and salary < salary_floor:
+            # In the remote-tradeoff band — above the remote floor but below
+            # the absolute floor. Score is neutral, but surface the reason
+            # so the reader sees why the role wasn't filtered out.
+            job.match_reasons.append("Remote OK")
 
     return job
 
