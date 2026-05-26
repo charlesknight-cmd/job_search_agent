@@ -107,6 +107,20 @@ def load_profile(name: str, profiles_dir: Optional[Path] = None) -> Dict:
     missing = REQUIRED_PROFILE_KEYS - cfg.keys()
     if missing:
         raise ValueError(f"Profile {name} is missing required keys: {sorted(missing)}")
+
+    # Floor-ordering sanity check: remote_salary_floor above the absolute
+    # floor would silently invert the intended behaviour (a remote £85k role
+    # would be penalised when the same onsite role would not). Catch at
+    # load time rather than producing surprising empty reports.
+    filters = cfg.get("filters", {})
+    rsf = filters.get("remote_salary_floor")
+    sf = filters.get("salary_floor")
+    if rsf is not None and sf is not None and rsf > sf:
+        raise ValueError(
+            f"Profile {name}: remote_salary_floor ({rsf}) must be <= "
+            f"salary_floor ({sf}). A remote floor above the absolute "
+            f"floor would penalise remote roles more strictly than onsite."
+        )
     return cfg
 
 
@@ -241,12 +255,48 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
 # every score_job() call. Both are immutable; safe to share across calls.
 PERMANENT_RE = re.compile(r"(?<![\w-])(?:permanent|substantive)\b", re.IGNORECASE)
 
-# Substring match against lowercased title+description. Detects "largely
-# remote" working arrangements which justify a lower salary floor — a £75k
-# role you don't need to relocate for is materially different to £75k with
-# a daily commute. Kept deliberately tight: "remote" and "hybrid" are the
-# unambiguous signals; "flexible" alone is too vague to count.
-REMOTE_SIGNAL_TERMS = ("remote", "hybrid", "work from home", "wfh")
+# Detects remote / hybrid *working arrangements*. Naive substring match on
+# bare "remote"/"hybrid" produces too many false positives — "hybrid learning",
+# "hybrid course delivery", "hybrid event", "remote possibility", "remote
+# location" are all common in HE descriptions for reasons unrelated to where
+# the postholder sits. Each pattern below requires an arrangement-qualifying
+# word ("working", "role", "first", etc.) so "hybrid course" does NOT match
+# but "hybrid working" does.
+REMOTE_SIGNAL_RE = re.compile(
+    r"\b(?:"
+    r"fully\s+remote"
+    r"|remote[\s-]first"
+    r"|remote\s+work(?:ing)?"
+    r"|remote\s+(?:role|position|opportunity|job|based|contract)"
+    r"|hybrid\s+work(?:ing)?"
+    r"|hybrid\s+(?:role|position|model|arrangement|approach|pattern)"
+    r"|work[\s-]from[\s-]home"
+    r"|wfh"
+    r")\b",
+    re.IGNORECASE,
+)
+# Negation guard: a positive match preceded by "not"/"no"/"without" within
+# ~30 chars is treated as not-remote. Catches "this is not a remote role"
+# and "no hybrid working available".
+NEGATION_LOOKBACK_RE = re.compile(r"\b(?:not|no|without)\b[^.]{0,30}$", re.IGNORECASE)
+
+
+def detect_remote_arrangement(text: str) -> bool:
+    """Return True iff ``text`` describes a remote/hybrid working arrangement.
+
+    Two-step check: a qualifier-specific phrase must match (e.g. "remote
+    working", not bare "remote"), AND the 30 chars immediately preceding
+    that match must not contain a negation word. This is strict by design:
+    the cost of a false positive (penalty-free sub-floor salary) is higher
+    than the cost of a false negative (a single role we don't recognise as
+    remote, but which still scores correctly on its absolute salary).
+    """
+    for match in REMOTE_SIGNAL_RE.finditer(text):
+        window = text[max(0, match.start() - 30):match.start()]
+        if NEGATION_LOOKBACK_RE.search(window):
+            continue
+        return True
+    return False
 
 # Keys are matched as substrings against ``full_text`` (lowercased title +
 # description). Short acronyms are wrapped in spaces to avoid matching inside
@@ -307,6 +357,9 @@ MAX_EXPERTISE_TAGS = 3
 def score_job(job: Job, config: Dict) -> Job:
     w = config["weights"]
     full_text = f"{job.title} {job.description}".lower()
+    # Computed once and reused for both geography_bonus and the remote
+    # salary tradeoff so the two paths cannot drift.
+    is_remote = detect_remote_arrangement(full_text)
     job.score = 0.0
     job.match_reasons = []
 
@@ -351,9 +404,14 @@ def score_job(job: Job, config: Dict) -> Job:
         job.score += w["expertise_signal"]
         job.match_reasons.extend(matched_expertise[:MAX_EXPERTISE_TAGS])
 
-    # 5. Geography (HE profile only)
+    # 5. Geography (HE profile only). The remote/hybrid portion delegates to
+    # the shared is_remote computed once at the top — previously the inline
+    # list held bare "remote"/"hybrid" substrings that would drift from the
+    # salary-tradeoff detector.
     if w.get("geography_bonus"):
-        if any(t in full_text for t in ["scotland", "edinburgh", "glasgow", "st andrews", "dundee", "aberdeen", "stirling", "remote", "hybrid"]):
+        uk_terms = ["scotland", "edinburgh", "glasgow", "st andrews",
+                    "dundee", "aberdeen", "stirling"]
+        if any(t in full_text for t in uk_terms) or is_remote:
             job.score += w["geography_bonus"]
             job.match_reasons.append("Geographic Match")
 
@@ -389,7 +447,6 @@ def score_job(job: Job, config: Dict) -> Job:
     # occasional "Director (£90k)" style listing.
     salary = extract_salary(f"{job.title} {job.description}")
     job.salary = salary
-    is_remote = any(t in full_text for t in REMOTE_SIGNAL_TERMS)
     effective_floor = remote_salary_floor if is_remote else salary_floor
     if salary is not None:
         if salary >= salary_target:
@@ -726,12 +783,16 @@ def generate_html_report(
         # Salary chip: only rendered when the scraper extracted a plausible
         # GBP figure. The colour is keyed to the role's target — green at/above,
         # amber if below the floor we care about — so triage is visual at a
-        # glance rather than requiring you to read the number.
+        # glance rather than requiring you to read the number. Roles tagged
+        # "Remote OK" (sub-floor salary that scoring deliberately let through
+        # because the role is remote/hybrid) render amber rather than pink so
+        # the chip doesn't visually contradict the tag immediately next to it.
         salary_value = r["salary"] if "salary" in r.keys() else None
+        remote_ok = "Remote OK" in (r["reasons"] or "")
         if salary_value:
             if salary_value >= 100000:
                 salary_bg, salary_fg, salary_border = "#e8f5e9", "#1b5e20", "#a5d6a7"
-            elif salary_value >= 80000:
+            elif salary_value >= 80000 or remote_ok:
                 salary_bg, salary_fg, salary_border = "#fff8e1", "#bf6700", "#ffd180"
             else:
                 salary_bg, salary_fg, salary_border = "#fce4ec", "#880e4f", "#f48fb1"
