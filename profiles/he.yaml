@@ -12,6 +12,11 @@ filters:
   # signal we want to chase.
   salary_floor: 80000
   salary_target: 100000
+  # Lower floor used when the role looks remote or hybrid. A £75k role you
+  # don't have to relocate for is materially different from £75k requiring
+  # a London office, so it shouldn't be penalised the same way. Roles below
+  # this remote floor are still penalised — the tradeoff isn't unlimited.
+  remote_salary_floor: 70000
   # HE senior leadership is a lower-cadence market than charity — roles are
   # advertised once and recruited over 4-8 weeks. A 24h window leaves most
   # daily reports legitimately empty between waves. Widening to 72h smooths

@@ -412,5 +412,65 @@ class TestSalaryScoring(unittest.TestCase):
         self.assertIsNone(job.salary)
 
 
+class TestRemoteSalaryTradeoff(unittest.TestCase):
+    """A remote/hybrid signal lowers the salary floor so roles between
+    remote_salary_floor and salary_floor are treated as neutral, not penalised.
+    """
+
+    def _score_with_desc(self, description: str, config=HE_CONFIG) -> Job:
+        return score_job(
+            _make_job("Director of Innovation", description), config
+        )
+
+    def test_remote_role_in_tradeoff_band_not_penalised(self):
+        # £75k is below the £80k absolute floor but above the £70k remote
+        # floor — with "remote" in the description, no Below Target penalty.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Fully remote. Salary: £75,000."
+        )
+        self.assertNotIn("Below Target", job.match_reasons)
+        self.assertIn("Remote OK", job.match_reasons)
+
+    def test_hybrid_role_in_tradeoff_band_not_penalised(self):
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Hybrid working. Salary: £72,000."
+        )
+        self.assertNotIn("Below Target", job.match_reasons)
+        self.assertIn("Remote OK", job.match_reasons)
+
+    def test_onsite_role_at_same_salary_still_penalised(self):
+        # Same £75k figure, but no remote signal — the standard floor applies.
+        job = self._score_with_desc(
+            "Permanent senior leadership role based in our London office. "
+            "Salary: £75,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_remote_role_below_remote_floor_still_penalised(self):
+        # £65k is below even the remote floor — the tradeoff isn't unlimited.
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Remote-first. Salary: £65,000."
+        )
+        self.assertIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_remote_role_above_floor_no_tradeoff_tag(self):
+        # £85k is above the absolute floor — no penalty, no tradeoff tag
+        # either (the tag is reserved for the band between the two floors).
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Hybrid. Salary: £85,000."
+        )
+        self.assertNotIn("Below Target", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+    def test_remote_role_at_target_still_awards_bonus(self):
+        job = self._score_with_desc(
+            "Permanent senior leadership role. Remote. Salary: £110,000."
+        )
+        self.assertIn("Salary Match", job.match_reasons)
+        self.assertNotIn("Remote OK", job.match_reasons)
+
+
 if __name__ == "__main__":
     unittest.main()

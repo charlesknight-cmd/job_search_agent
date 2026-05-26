@@ -5,6 +5,7 @@ filters:
   minimum_score: 20
   salary_floor: 80000
   salary_target: 100000
+  remote_salary_floor: 70000
 sources:
   - name: jobs.ac.uk Professional
     url: https://www.jobs.ac.uk/search/director
