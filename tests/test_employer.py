@@ -32,6 +32,34 @@ class TestEmployerExtraction(unittest.TestCase):
             "fallback-source",
         )
 
+    def test_regex_does_not_spill_to_sentence(self):
+        # Regression: "University of X is seeking..." previously captured the entire sentence.
+        self.assertEqual(
+            extract_employer("University of Manchester is seeking a new PVC", "", "jobs.ac.uk"),
+            "University of Manchester",
+        )
+
+    def test_regex_preceding_capitalized_words(self):
+        # Regression: preceding capitalized words (e.g. "At") were captured because of lazy matching.
+        self.assertEqual(
+            extract_employer("At our campus Manchester Metropolitan University is hosting an event", "", "jobs.ac.uk"),
+            "Manchester Metropolitan University",
+        )
+
+    def test_complex_university_name(self):
+        # Complex multi-preposition university name
+        self.assertEqual(
+            extract_employer("A role at the University of the West of England in Bristol", "", "jobs.ac.uk"),
+            "University of the West of England",
+        )
+
+    def test_trailing_geography_name(self):
+        # Trailing location word after the suffix keyword
+        self.assertEqual(
+            extract_employer("Imperial College London has a vacancy", "", "jobs.ac.uk"),
+            "Imperial College London",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

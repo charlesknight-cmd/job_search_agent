@@ -139,7 +139,7 @@ def extract_description(page_html: str) -> str:
     """
     # Parameter is named ``page_html`` (not ``html``) so it does not shadow the
     # standard-library ``html`` module imported at the top of this file.
-    soup = BeautifulSoup(page_html, "lxml")
+    soup = BeautifulSoup(page_html, "html.parser")
 
     # Remove boilerplate elements unconditionally
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "noscript"]):
@@ -232,12 +232,8 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
 
     # Capture-group patterns for institution names
     patterns = [
-        r"(University of [A-Z][A-Za-z\s&']+?)(?:\s*[,\|\-]|\s{2}|$)",
-        r"([A-Z][A-Za-z\s&']+? University)(?:\s*[,\|\-]|\s{2}|$)",
-        r"([A-Z][A-Za-z\s&']+? College)(?:\s*[,\|\-]|\s{2}|$)",
-        r"([A-Z][A-Za-z\s&']+? Institute)(?:\s*[,\|\-]|\s{2}|$)",
-        r"([A-Z][A-Za-z\s&']+? Trust)(?:\s*[,\|\-]|\s{2}|$)",
-        r"([A-Z][A-Za-z\s&']+? Charity)(?:\s*[,\|\-]|\s{2}|$)",
+        r"\b(University of (?:the\s+)?[A-Z][a-zA-Z']*(?:\s+(?:of|the|upon|and)?\s*[A-Z][a-zA-Z']*)*)\b",
+        r"\b([A-Z][a-zA-Z']*(?:\s+(?:[A-Z][a-zA-Z']*|of|and|the|for))*\s+(?:University|College|Institute|Trust|Charity)(?:\s+[A-Z][a-zA-Z']*)*)\b",
     ]
     for text in [title, description[:800]]:
         for p in patterns:
@@ -887,7 +883,7 @@ async def _scrape_source(
         logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
         return [], stats
 
-    soup = BeautifulSoup(listing_resp.text, "lxml")
+    soup = BeautifulSoup(listing_resp.text, "html.parser")
     links = list(soup.select(src["selector"]))
     stats.links_matched = len(links)
     # Per-source match count surfaces dead selectors passively in the log —
