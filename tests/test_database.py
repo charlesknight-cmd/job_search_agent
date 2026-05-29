@@ -94,6 +94,17 @@ class TestTouchSeenMany(unittest.TestCase):
     def tearDown(self):
         self.db.close()
 
+    def _set_status(self, url: str, status: str):
+        self.db.conn.execute(
+            "UPDATE jobs SET status = ? WHERE url = ?", (status, url)
+        )
+        self.db.conn.commit()
+
+    def _status(self, url: str) -> str:
+        return self.db.conn.execute(
+            "SELECT status FROM jobs WHERE url = ?", (url,)
+        ).fetchone()["status"]
+
     def test_touch_refreshes_last_seen_and_prevents_stale(self):
         url = "https://example.test/known"
         self.db.upsert_job(_make_job("fp_known", url))
@@ -133,6 +144,77 @@ class TestTouchSeenMany(unittest.TestCase):
         }
         self.assertEqual(rows["https://example.test/a"], "new")
         self.assertEqual(rows["https://example.test/b"], "stale")
+
+    def test_touch_reactivates_stale_job(self):
+        url = "https://example.test/reappeared"
+        self.db.upsert_job(_make_job("fp_reappeared", url))
+        self._set_status(url, "stale")
+
+        self.db.touch_seen_many([url])
+
+        status = self.db.conn.execute(
+            "SELECT status FROM jobs WHERE url = ?", (url,)
+        ).fetchone()["status"]
+        self.assertEqual(status, "new")
+
+    def test_touch_preserves_curated_status(self):
+        url = "https://example.test/applied"
+        self.db.upsert_job(_make_job("fp_applied", url))
+        self._set_status(url, "applied")
+
+        self.db.touch_seen_many([url])
+
+        status = self.db.conn.execute(
+            "SELECT status FROM jobs WHERE url = ?", (url,)
+        ).fetchone()["status"]
+        self.assertEqual(status, "applied")
+
+    def test_touch_backfills_source_for_legacy_row(self):
+        url = "https://example.test/source"
+        self.db.upsert_job(_make_job("fp_source", url))
+        self.db.conn.execute("UPDATE jobs SET source = NULL WHERE url = ?", (url,))
+        self.db.conn.commit()
+
+        self.db.touch_seen_many([url], source="jobs.ac.uk")
+
+        source = self.db.conn.execute(
+            "SELECT source FROM jobs WHERE url = ?", (url,)
+        ).fetchone()["source"]
+        self.assertEqual(source, "jobs.ac.uk")
+
+    def test_mark_stale_only_checks_successful_sources(self):
+        self.db.upsert_job(_make_job("fp_a", "https://example.test/a"))
+        self.db.upsert_job(_make_job("fp_b", "https://example.test/b"))
+        self.db.conn.execute(
+            "UPDATE jobs SET source = CASE url "
+            "WHEN 'https://example.test/a' THEN 'healthy' "
+            "ELSE 'failed' END"
+        )
+        self.db.conn.commit()
+        old = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        self.db.conn.execute("UPDATE jobs SET last_seen_at = ?", (old,))
+        self.db.conn.commit()
+
+        marked = self.db.mark_stale(hours=168, sources=["healthy"])
+
+        rows = {
+            r["url"]: r["status"]
+            for r in self.db.conn.execute("SELECT url, status FROM jobs").fetchall()
+        }
+        self.assertEqual(marked, 1)
+        self.assertEqual(rows["https://example.test/a"], "stale")
+        self.assertEqual(rows["https://example.test/b"], "new")
+
+    def test_mark_stale_with_no_successful_sources_is_noop(self):
+        self.db.upsert_job(_make_job("fp_a", "https://example.test/a"))
+        old = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        self.db.conn.execute("UPDATE jobs SET last_seen_at = ?", (old,))
+        self.db.conn.commit()
+
+        marked = self.db.mark_stale(hours=168, sources=[])
+
+        self.assertEqual(marked, 0)
+        self.assertEqual(self._status("https://example.test/a"), "new")
 
 
 if __name__ == "__main__":

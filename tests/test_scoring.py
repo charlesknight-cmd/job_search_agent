@@ -12,6 +12,7 @@ from job_search_agent import (  # noqa: E402
     CHARITY_CONFIG,
     HE_CONFIG,
     Job,
+    SECTOR_BODIES_CONFIG,
     extract_salary,
     score_job,
 )
@@ -61,6 +62,30 @@ class TestExclusionGate(unittest.TestCase):
         )
         self.assertNotIn("Excluded", job.match_reasons)
         self.assertGreater(job.score, 0)
+
+    def test_charity_digital_leadership_not_excluded_by_software_mention(self):
+        job = score_job(
+            _make_job(
+                "Director of Innovation",
+                "Permanent education charity leadership role working with "
+                "software suppliers and learning platform engineers.",
+            ),
+            CHARITY_CONFIG,
+        )
+        self.assertNotIn("Excluded", job.match_reasons)
+        self.assertGreater(job.score, CHARITY_CONFIG["filters"]["minimum_score"])
+
+    def test_sector_digital_leadership_not_excluded_by_engineer_mention(self):
+        job = score_job(
+            _make_job(
+                "Director of Standards",
+                "Permanent professional standards role partnering with data "
+                "engineers on accreditation systems.",
+            ),
+            SECTOR_BODIES_CONFIG,
+        )
+        self.assertNotIn("Excluded", job.match_reasons)
+        self.assertGreater(job.score, SECTOR_BODIES_CONFIG["filters"]["minimum_score"])
 
 
 class TestPermanentDetection(unittest.TestCase):
