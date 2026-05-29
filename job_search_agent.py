@@ -485,6 +485,7 @@ class Database:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 fingerprint TEXT PRIMARY KEY,
+                source TEXT,
                 title TEXT,
                 employer TEXT,
                 url TEXT,
@@ -502,6 +503,8 @@ class Database:
         cols = [row[1] for row in cursor.fetchall()]
         if "reasons" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN reasons TEXT")
+        if "source" not in cols:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN source TEXT")
         if "status" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'new'")
         if "last_seen_at" not in cols:
@@ -511,6 +514,7 @@ class Database:
         # find_canonical/touch_seen_many filter by url — without an index
         # SQLite scans the table on every lookup.
         self.conn.execute("CREATE INDEX IF NOT EXISTS jobs_url_idx ON jobs(url)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS jobs_source_idx ON jobs(source)")
         self.conn.commit()
 
     def find_canonical(self, title: str, url: str) -> bool:
@@ -526,53 +530,86 @@ class Database:
     def upsert_job(self, job: Job):
         now = datetime.now(timezone.utc).isoformat()
         self.conn.execute("""
-            INSERT INTO jobs (fingerprint, title, employer, url, description, score, reasons, fetched_at, first_seen_at, last_seen_at, status, salary)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
+            INSERT INTO jobs (fingerprint, source, title, employer, url, description, score, reasons, fetched_at, first_seen_at, last_seen_at, status, salary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
             ON CONFLICT(fingerprint) DO UPDATE SET
+                source = excluded.source,
                 score = excluded.score,
                 reasons = excluded.reasons,
                 fetched_at = excluded.fetched_at,
                 last_seen_at = excluded.last_seen_at,
                 salary = excluded.salary
         """, (
-            job.fingerprint, job.title, job.employer, job.url,
+            job.fingerprint, job.source, job.title, job.employer, job.url,
             job.description, job.score, ", ".join(job.match_reasons),
             job.fetched_at, now, now, job.salary
         ))
         self.conn.commit()
 
-    def touch_seen_many(self, urls: List[str]) -> None:
+    def touch_seen_many(self, urls: List[str], source: Optional[str] = None) -> None:
         """Record that a batch of already-known URLs were seen on this run.
 
         Lets stale-marking distinguish jobs still listed on the source from
-        jobs that have actually disappeared. Batched into a single
-        ``executemany`` + commit so a source re-seeing hundreds of known URLs
-        pays one fsync, not one per URL — and so all DB *writes* stay on the
-        serial caller side (see ``process_profile``).
+        jobs that have actually disappeared. Re-seeing a stale URL makes it
+        ``new`` again, while curated statuses remain untouched. Batched into a
+        single ``executemany`` + commit so a source re-seeing hundreds of known
+        URLs pays one fsync, not one per URL — and so all DB *writes* stay on
+        the serial caller side (see ``process_profile``).
         """
         if not urls:
             return
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.executemany(
-            "UPDATE jobs SET last_seen_at = ? WHERE url = ?",
-            [(now, url) for url in urls],
-        )
+        if source is None:
+            self.conn.executemany(
+                "UPDATE jobs "
+                "SET last_seen_at = ?, "
+                "status = CASE WHEN status = 'stale' THEN 'new' ELSE status END "
+                "WHERE url = ?",
+                [(now, url) for url in urls],
+            )
+        else:
+            self.conn.executemany(
+                "UPDATE jobs "
+                "SET last_seen_at = ?, "
+                "source = COALESCE(source, ?), "
+                "status = CASE WHEN status = 'stale' THEN 'new' ELSE status END "
+                "WHERE url = ?",
+                [(now, source, url) for url in urls],
+            )
         self.conn.commit()
 
-    def mark_stale(self, hours: int = STALE_AFTER_HOURS) -> int:
+    def mark_stale(
+        self,
+        hours: int = STALE_AFTER_HOURS,
+        sources: Optional[List[str]] = None,
+    ) -> int:
         """Mark jobs not seen within ``hours`` as 'stale'. Returns affected row count.
 
         Curated statuses ('interested', 'applied') are preserved as well as
         'rejected' and 'stale': ``status`` doubles as the user's application
         pipeline, so a listing disappearing must not silently overwrite the
         fact that the user has already applied to or flagged the role.
+
+        When ``sources`` is supplied, only jobs from successfully checked
+        sources are eligible. That prevents a temporary source outage from
+        making still-live vacancies look stale.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        params = [cutoff]
+        source_filter = ""
+        if sources is not None:
+            unique_sources = sorted(set(sources))
+            if not unique_sources:
+                return 0
+            placeholders = ", ".join("?" for _ in unique_sources)
+            source_filter = f" AND source IN ({placeholders})"
+            params.extend(unique_sources)
         cursor = self.conn.execute(
             "UPDATE jobs SET status = 'stale' "
             "WHERE status NOT IN ('stale', 'rejected', 'interested', 'applied') "
-            "AND (last_seen_at IS NULL OR last_seen_at < ?)",
-            (cutoff,)
+            "AND (last_seen_at IS NULL OR last_seen_at < ?)"
+            f"{source_filter}",
+            params,
         )
         self.conn.commit()
         return cursor.rowcount
@@ -914,6 +951,7 @@ async def _scrape_source(
         return [], stats, seen_urls
 
     candidates = []
+    seen_candidate_urls = set()
     for a in links:
         raw_title = a.get_text(" ").strip()
         href = a.get("href", "")
@@ -931,6 +969,9 @@ async def _scrape_source(
         if not any(t in raw_title.lower() for t in cfg["title_gate"]):
             continue
 
+        if url in seen_candidate_urls:
+            continue
+        seen_candidate_urls.add(url)
         candidates.append((raw_title, url))
 
     stats.candidates = len(candidates)
@@ -997,6 +1038,7 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             )
 
         source_stats: List[SourceStats] = []
+        successful_sources: List[str] = []
         for src, result in zip(cfg["sources"], source_results):
             if isinstance(result, Exception):
                 logger.error(f"Error scraping {src['name']}: {result}")
@@ -1004,9 +1046,11 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
                 continue
             jobs, stats, seen_urls = result
             source_stats.append(stats)
+            if not stats.listing_failed and stats.links_matched > 0:
+                successful_sources.append(src["name"])
             # Refresh last_seen_at for already-known URLs (skipped on dry runs).
             if not dry_run:
-                db.touch_seen_many(seen_urls)
+                db.touch_seen_many(seen_urls, source=src["name"])
             for job in jobs:
                 if dry_run:
                     logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")
@@ -1017,7 +1061,7 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
         if dry_run:
             return
 
-        stale_count = db.mark_stale()
+        stale_count = db.mark_stale(sources=successful_sources)
         if stale_count:
             logger.info(f"Marked {stale_count} job(s) as stale (not seen in {STALE_AFTER_HOURS}h)")
 

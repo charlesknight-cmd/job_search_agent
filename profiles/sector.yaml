@@ -85,9 +85,11 @@ title_gate:
   - managing director
   - secretary general
 exclusion_terms:
-  - software
-  - developer
-  - engineer
+  - software developer
+  - software engineer
+  - software architect
+  - curriculum developer
+  - policy developer
   - technician
   - warehouse
   - nurse
