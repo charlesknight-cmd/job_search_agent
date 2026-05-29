@@ -184,9 +184,14 @@ SALARY_RE = re.compile(
     r"|"
     r"£\s*(\d{4,7})(?!\d)"
 )
-# Reject anything below this once normalised to pounds — keeps voucher/expense
-# amounts ("£25 gift voucher") from polluting the salary signal.
-MIN_PLAUSIBLE_SALARY = 1000
+# Reject anything below this once normalised to pounds. Set well above the
+# incidental figures that pepper senior listings — relocation allowances,
+# conference bursaries, stipends, vouchers ("£1,500 relocation", "£25 gift
+# voucher") — so they don't masquerade as a salary signal. Otherwise a role
+# that never stated pay would have its largest incidental amount treated as
+# the salary, tripping a spurious "Below Target" penalty (the intent is that
+# no stated salary stays neutral). No plausible senior salary sits below this.
+MIN_PLAUSIBLE_SALARY = 20000
 
 
 def extract_salary(text: str) -> Optional[int]:
@@ -503,8 +508,8 @@ class Database:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN last_seen_at TEXT")
         if "salary" not in cols:
             self.conn.execute("ALTER TABLE jobs ADD COLUMN salary INTEGER")
-        # find_canonical/touch_seen filter by url — without an index SQLite
-        # scans the table on every lookup.
+        # find_canonical/touch_seen_many filter by url — without an index
+        # SQLite scans the table on every lookup.
         self.conn.execute("CREATE INDEX IF NOT EXISTS jobs_url_idx ON jobs(url)")
         self.conn.commit()
 
@@ -536,24 +541,36 @@ class Database:
         ))
         self.conn.commit()
 
-    def touch_seen(self, url: str) -> None:
-        """Record that an already-known URL was seen on this run.
+    def touch_seen_many(self, urls: List[str]) -> None:
+        """Record that a batch of already-known URLs were seen on this run.
 
         Lets stale-marking distinguish jobs still listed on the source from
-        jobs that have actually disappeared.
+        jobs that have actually disappeared. Batched into a single
+        ``executemany`` + commit so a source re-seeing hundreds of known URLs
+        pays one fsync, not one per URL — and so all DB *writes* stay on the
+        serial caller side (see ``process_profile``).
         """
+        if not urls:
+            return
         now = datetime.now(timezone.utc).isoformat()
-        self.conn.execute(
-            "UPDATE jobs SET last_seen_at = ? WHERE url = ?", (now, url)
+        self.conn.executemany(
+            "UPDATE jobs SET last_seen_at = ? WHERE url = ?",
+            [(now, url) for url in urls],
         )
         self.conn.commit()
 
     def mark_stale(self, hours: int = STALE_AFTER_HOURS) -> int:
-        """Mark jobs not seen within ``hours`` as 'stale'. Returns affected row count."""
+        """Mark jobs not seen within ``hours`` as 'stale'. Returns affected row count.
+
+        Curated statuses ('interested', 'applied') are preserved as well as
+        'rejected' and 'stale': ``status`` doubles as the user's application
+        pipeline, so a listing disappearing must not silently overwrite the
+        fact that the user has already applied to or flagged the role.
+        """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         cursor = self.conn.execute(
             "UPDATE jobs SET status = 'stale' "
-            "WHERE status NOT IN ('stale', 'rejected') "
+            "WHERE status NOT IN ('stale', 'rejected', 'interested', 'applied') "
             "AND (last_seen_at IS NULL OR last_seen_at < ?)",
             (cutoff,)
         )
@@ -865,23 +882,26 @@ async def _scrape_source(
     src: Dict,
     cfg: Dict,
     db: Database,
-    dry_run: bool,
 ) -> tuple:
     """Scrape one source: fetch listing, filter, fetch details concurrently, score.
 
-    Returns ``(jobs, stats)`` where ``jobs`` is the list of *new* scored jobs
-    ready for the caller to upsert and ``stats`` is a :class:`SourceStats`
-    capturing the funnel counts for the email footer panel. DB writes happen
-    on the caller side so all upserts run serially on the single SQLite
-    connection — coroutines do the I/O, the caller does the writes.
+    Returns ``(jobs, stats, seen_urls)`` where ``jobs`` is the list of *new*
+    scored jobs ready for the caller to upsert, ``stats`` is a
+    :class:`SourceStats` capturing the funnel counts for the email footer
+    panel, and ``seen_urls`` is the already-known URLs the caller should
+    refresh ``last_seen_at`` for. This coroutine only *reads* from the DB
+    (``find_canonical``); every write — upserts and seen-refreshes — is
+    returned to the caller so all writes run serially on the single SQLite
+    connection. Coroutines do the I/O, the caller does the writes.
     """
     stats = SourceStats(name=src["name"])
+    seen_urls: List[str] = []
 
     listing_resp = await fetch_with_retry(client, src["url"])
     if listing_resp is None:
         stats.listing_failed = True
         logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
-        return [], stats
+        return [], stats, seen_urls
 
     soup = BeautifulSoup(listing_resp.text, "html.parser")
     links = list(soup.select(src["selector"]))
@@ -891,7 +911,7 @@ async def _scrape_source(
     # for removal from the YAML.
     logger.info(f"{src['name']}: {len(links)} link(s) matched selector")
     if not links:
-        return [], stats
+        return [], stats, seen_urls
 
     candidates = []
     for a in links:
@@ -902,10 +922,10 @@ async def _scrape_source(
         url = urljoin(src["url"], href)
 
         if db.find_canonical(raw_title, url):
-            # Known URL — refresh last_seen_at so stale-marking only fires
-            # when the listing actually disappears.
-            if not dry_run:
-                db.touch_seen(url)
+            # Known URL — record it so the caller can refresh last_seen_at,
+            # which keeps stale-marking from firing while the listing is still
+            # up. Collected here, written caller-side (see docstring).
+            seen_urls.append(url)
             continue
 
         if not any(t in raw_title.lower() for t in cfg["title_gate"]):
@@ -915,7 +935,7 @@ async def _scrape_source(
 
     stats.candidates = len(candidates)
     if not candidates:
-        return [], stats
+        return [], stats, seen_urls
 
     sem = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
 
@@ -954,7 +974,7 @@ async def _scrape_source(
         if r.score >= cfg["filters"]["minimum_score"]:
             scored.append(r)
     stats.new_scored = len(scored)
-    return scored, stats
+    return scored, stats, seen_urls
 
 
 async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
@@ -972,7 +992,7 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             # load polite per host. return_exceptions so one broken source
             # cannot bring down the whole run.
             source_results = await asyncio.gather(
-                *[_scrape_source(client, src, cfg, db, dry_run) for src in cfg["sources"]],
+                *[_scrape_source(client, src, cfg, db) for src in cfg["sources"]],
                 return_exceptions=True,
             )
 
@@ -982,8 +1002,11 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
                 logger.error(f"Error scraping {src['name']}: {result}")
                 source_stats.append(SourceStats(name=src["name"], listing_failed=True))
                 continue
-            jobs, stats = result
+            jobs, stats, seen_urls = result
             source_stats.append(stats)
+            # Refresh last_seen_at for already-known URLs (skipped on dry runs).
+            if not dry_run:
+                db.touch_seen_many(seen_urls)
             for job in jobs:
                 if dry_run:
                     logger.info(f"[dry-run] would save: [{job.score}] {job.title} @ {job.employer}")

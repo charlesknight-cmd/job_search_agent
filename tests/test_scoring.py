@@ -326,6 +326,29 @@ class TestSalaryExtraction(unittest.TestCase):
         # "£25 voucher" should not be treated as a salary signal.
         self.assertIsNone(extract_salary("Receive a £25 gift voucher"))
 
+    def test_relocation_allowance_rejected(self):
+        # Incidental four-figure amounts (relocation, stipends, bursaries) sit
+        # below the plausible-salary floor and must not be read as pay — a role
+        # stating no salary should stay neutral, not be penalised on £1,500.
+        self.assertIsNone(
+            extract_salary("Includes a £1,500 relocation allowance")
+        )
+
+    def test_conference_bursary_rejected(self):
+        self.assertIsNone(
+            extract_salary("Annual £1,200 conference and training bursary")
+        )
+
+    def test_real_salary_wins_over_incidental_amount(self):
+        # When both a genuine salary and an incidental amount appear, the
+        # genuine figure is returned (highest plausible value).
+        self.assertEqual(
+            extract_salary(
+                "Salary £95,000 per annum plus a £1,500 relocation allowance"
+            ),
+            95000,
+        )
+
     def test_no_salary_returns_none(self):
         self.assertIsNone(extract_salary("Permanent senior leadership role"))
 
@@ -410,6 +433,18 @@ class TestSalaryScoring(unittest.TestCase):
     def test_salary_none_when_not_stated(self):
         job = self._score_with_desc("Permanent senior leadership role.")
         self.assertIsNone(job.salary)
+
+    def test_incidental_amount_does_not_trigger_below_target(self):
+        # Regression: a role that states no salary but mentions an incidental
+        # figure (£1,500 relocation) must stay neutral — previously the £1,500
+        # was read as the salary and tripped a spurious Below Target penalty.
+        job = self._score_with_desc(
+            "Permanent senior leadership role driving knowledge exchange. "
+            "Includes a £1,500 relocation allowance."
+        )
+        self.assertIsNone(job.salary)
+        self.assertNotIn("Below Target", job.match_reasons)
+        self.assertNotIn("Salary Match", job.match_reasons)
 
 
 class TestRemoteSalaryTradeoff(unittest.TestCase):
