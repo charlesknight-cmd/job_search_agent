@@ -252,6 +252,162 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
     return source_name
 
 
+# --- STRUCTURED DATA (schema.org JobPosting JSON-LD) ---
+# Many job boards embed a schema.org ``JobPosting`` block as JSON-LD in a
+# ``<script type="application/ld+json">`` tag. It carries the true employer
+# (``hiringOrganization.name``), salary (``baseSalary``), and location
+# (``jobLocation``) far more reliably than scraping rendered HTML — and it
+# benefits *every* source, not just jobs.ac.uk. We use it as a high-priority
+# signal and keep the regex heuristics as a fallback for sites without it.
+_SALARY_YEAR_UNITS = {"", "YEAR", "YEARLY", "ANNUM", "ANNUAL", "ANNUALLY"}
+
+
+def _coerce_number(value) -> Optional[float]:
+    """Best-effort parse of a JSON-LD numeric field (int, float, or string)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").replace("£", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _find_jobposting(node):
+    """Recursively locate a ``JobPosting`` object within parsed JSON-LD.
+
+    Handles the common shapes: a bare object, a list of objects, and the
+    ``@graph`` / ``mainEntity`` wrappers. ``@type`` may be a string or a list.
+    """
+    if isinstance(node, dict):
+        types = node.get("@type")
+        types = types if isinstance(types, list) else [types]
+        if "JobPosting" in types:
+            return node
+        for key in ("@graph", "mainEntity", "itemListElement"):
+            if key in node:
+                found = _find_jobposting(node[key])
+                if found:
+                    return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_jobposting(item)
+            if found:
+                return found
+    return None
+
+
+def _jsonld_salary(base) -> Optional[int]:
+    """Extract an annual GBP salary from a ``baseSalary`` MonetaryAmount.
+
+    Picks the top of a min/max band (consistent with ``extract_salary``).
+    Skips non-annual figures (hourly/daily rates) and sub-floor values so an
+    hourly rate never masquerades as a salary.
+    """
+    if not isinstance(base, dict):
+        return None
+    value = base.get("value")
+    candidates: List[float] = []
+    if isinstance(value, dict):
+        unit = value.get("unitText")
+        if isinstance(unit, str) and unit.upper() not in _SALARY_YEAR_UNITS:
+            return None
+        for key in ("value", "maxValue", "minValue"):
+            num = _coerce_number(value.get(key))
+            if num is not None:
+                candidates.append(num)
+    else:
+        num = _coerce_number(value)
+        if num is not None:
+            candidates.append(num)
+    if not candidates:
+        return None
+    best = max(candidates)
+    if best < MIN_PLAUSIBLE_SALARY:
+        return None
+    return int(best)
+
+
+def _jsonld_location(loc) -> str:
+    """Build a human-readable location string from a ``jobLocation`` Place."""
+    if isinstance(loc, list):
+        for item in loc:
+            text = _jsonld_location(item)
+            if text:
+                return text
+        return ""
+    if not isinstance(loc, dict):
+        return ""
+    address = loc.get("address")
+    if isinstance(address, str):
+        return address.strip()
+    parts = []
+    if isinstance(address, dict):
+        for key in ("addressLocality", "addressRegion", "addressCountry"):
+            v = address.get(key)
+            if isinstance(v, dict):
+                v = v.get("name")
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+    return ", ".join(parts)
+
+
+def parse_jobposting_jsonld(page_html: str) -> Dict:
+    """Parse a schema.org ``JobPosting`` JSON-LD block from a detail page.
+
+    Returns a dict with any of the normalised keys ``employer``, ``salary``,
+    ``location``, ``employment_type``, ``valid_through`` that were found, or an
+    empty dict when no parsable ``JobPosting`` block is present.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = tag.string or tag.get_text()
+        if not raw or not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        posting = _find_jobposting(data)
+        if not posting:
+            continue
+
+        out: Dict = {}
+        org = posting.get("hiringOrganization")
+        if isinstance(org, dict):
+            name = org.get("name")
+            if isinstance(name, str) and name.strip():
+                out["employer"] = name.strip()
+        elif isinstance(org, str) and org.strip():
+            out["employer"] = org.strip()
+
+        salary = _jsonld_salary(posting.get("baseSalary"))
+        if salary is not None:
+            out["salary"] = salary
+
+        location = _jsonld_location(posting.get("jobLocation"))
+        if location:
+            out["location"] = location
+
+        et = posting.get("employmentType")
+        if isinstance(et, list):
+            et = " ".join(str(x) for x in et if x)
+        if isinstance(et, str) and et.strip():
+            out["employment_type"] = et.strip()
+
+        vt = posting.get("validThrough")
+        if isinstance(vt, str) and vt.strip():
+            out["valid_through"] = vt.strip()
+
+        if out:
+            return out
+    return {}
+
+
 # --- SCORING ---
 # Hot-path constants — compiled / built once at import time rather than on
 # every score_job() call. Both are immutable; safe to share across calls.
@@ -915,6 +1071,53 @@ DETAIL_FETCH_CONCURRENCY = 3
 DETAIL_FETCH_JITTER = (0.3, 0.8)
 
 
+def extract_card_employer(link) -> Optional[str]:
+    """Pull the employer from the listing card wrapping a title link.
+
+    jobs.ac.uk wraps each result in ``.j-search-result__result`` and names the
+    institution in ``.j-search-result__employer``. Reading it at listing time
+    gives a reliable employer without a second request — useful as a fallback
+    for boards that omit JSON-LD on the detail page. Returns ``None`` when no
+    recognisable employer node is found.
+    """
+    card = link.find_parent(class_="j-search-result__result")
+    if card is None:
+        return None
+    emp = card.select_one(".j-search-result__employer")
+    if emp is None:
+        return None
+    text = emp.get_text(" ", strip=True)
+    return text or None
+
+
+def extract_link_title(link) -> str:
+    """Return the job title for a listing anchor, with a card-heading fallback.
+
+    Most boards put the title in the anchor's own text, so we use that when it
+    is present. Some sites use a "stretched link" card layout, where the
+    clickable ``<a>`` is an empty overlay covering the card and the title lives
+    in a sibling heading (e.g. Dixon Walter renders an empty
+    ``a.showcase__link-stretch`` next to an ``<h4>``). When the anchor text is
+    empty or too short to be a real title, fall back to the first heading
+    (``<h1>``–``<h4>``) inside the nearest containing card
+    (``<article>``/``<li>``/``<div>``). The guard means sources where the
+    anchor text *is* the title are unaffected.
+    """
+    anchor_text = link.get_text(" ", strip=True)
+    if len(anchor_text) >= 10:
+        return anchor_text
+
+    card = link.find_parent(["article", "li", "div"])
+    if card is not None:
+        heading = card.find(["h1", "h2", "h3", "h4"])
+        if heading is not None:
+            heading_text = heading.get_text(" ", strip=True)
+            if heading_text:
+                return heading_text
+
+    return anchor_text
+
+
 async def _scrape_source(
     client: httpx.AsyncClient,
     src: Dict,
@@ -954,7 +1157,7 @@ async def _scrape_source(
     candidates = []
     seen_candidate_urls = set()
     for a in links:
-        raw_title = a.get_text(" ").strip()
+        raw_title = extract_link_title(a)
         href = a.get("href", "")
         if not href or len(raw_title) < 10:
             continue
@@ -973,7 +1176,7 @@ async def _scrape_source(
         if url in seen_candidate_urls:
             continue
         seen_candidate_urls.add(url)
-        candidates.append((raw_title, url))
+        candidates.append((raw_title, url, extract_card_employer(a)))
 
     stats.candidates = len(candidates)
     if not candidates:
@@ -981,7 +1184,9 @@ async def _scrape_source(
 
     sem = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
 
-    async def fetch_and_score(raw_title: str, url: str) -> Optional[Job]:
+    async def fetch_and_score(
+        raw_title: str, url: str, card_employer: Optional[str]
+    ) -> Optional[Job]:
         async with sem:
             await asyncio.sleep(random.uniform(*DETAIL_FETCH_JITTER))
             det = await fetch_with_retry(client, url)
@@ -995,14 +1200,33 @@ async def _scrape_source(
                 fetched_at=datetime.now(timezone.utc).isoformat(),
             )
             job.description = extract_description(det.text)
-            job.employer = extract_employer(raw_title, job.description, src["name"])
+            # Employer priority: structured JSON-LD > listing card > regex.
+            # The first two are reliable; the regex heuristic and source-name
+            # fallback only fire when neither is present.
+            posting = parse_jobposting_jsonld(det.text)
+            job.employer = (
+                posting.get("employer")
+                or card_employer
+                or extract_employer(raw_title, job.description, src["name"])
+            )
+            # Fold structured location and salary into the scored text so the
+            # geography and salary signals benefit even when the rendered
+            # description omits them. extract_salary picks up the appended
+            # "£NNNNN" via its bare-figure form; geography matches the location.
+            extras = []
+            if posting.get("location"):
+                extras.append(posting["location"])
+            if posting.get("salary"):
+                extras.append(f"£{posting['salary']}")
+            if extras:
+                job.description = f"{job.description} {' '.join(extras)}"
             job.fingerprint = hashlib.sha256(
                 f"{raw_title}{url}".encode()
             ).hexdigest()
             return score_job(job, cfg)
 
     results = await asyncio.gather(
-        *[fetch_and_score(t, u) for t, u in candidates],
+        *[fetch_and_score(t, u, e) for t, u, e in candidates],
         return_exceptions=True,
     )
 

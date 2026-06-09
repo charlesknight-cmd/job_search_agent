@@ -56,6 +56,15 @@ sources:
   - name: Peridot Partners
     url: https://www.peridotpartners.co.uk/job-role/education-executive-roles/
     selector: "h2 a[href*='/jobs/']"
+  # Dixon Walter — server-rendered "stretched link" cards: each role is an
+  # <article class="opportunities"> with an empty overlay anchor
+  # (a.showcase__link-stretch) plus the title in a sibling <h4>/<span>. The
+  # anchor carries the href but no text, so the scraper's card-heading title
+  # fallback (extract_link_title) reads the <h4>. Re-enabled June 2026 once
+  # that fallback landed.
+  - name: Dixon Walter
+    url: https://www.dixonwalter.co.uk/opportunities/
+    selector: "article.opportunities a.showcase__link-stretch"
   #
   # --- Excluded HE exec-search firms (audited June 2026) ---
   # All of the following render their vacancy lists client-side (JavaScript),
@@ -77,10 +86,8 @@ sources:
   #     opportunities are not in server HTML.
   #   - Minerva Search (minervasearch.com/current-opportunities/) — opportunity
   #     list injected by JS; not in server HTML.
-  #   - Dixon Walter (dixonwalter.co.uk/opportunities/) — server-rendered, BUT
-  #     the card title is an <h4>/<span>, not the (empty) stretched <a>, so the
-  #     link-text-as-title scraper can't read it. Needs a card-heading title
-  #     fallback in _scrape_source before it can be re-enabled.
+  #   (Dixon Walter was here too, but it is server-rendered — re-enabled above
+  #   once extract_link_title's card-heading title fallback landed.)
 
 weights:
   executive_bonus: 50
