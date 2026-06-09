@@ -7,6 +7,7 @@ import random
 import re
 import sqlite3
 import textwrap
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -1118,6 +1119,56 @@ def extract_link_title(link) -> str:
     return anchor_text
 
 
+def parse_feed_entries(xml_text: str) -> List[tuple]:
+    """Parse ``(title, link, employer)`` tuples from an RSS or Atom feed.
+
+    Some boards dropped their HTML listings for a JS app but still publish a
+    server-rendered feed (e.g. THE UniJobs / Madgex exposes a ``jobsrss``
+    endpoint that honours a ``Keywords`` query). Parsing the feed lets us keep
+    those sources without a headless browser.
+
+    Uses stdlib ``ElementTree`` so no lxml dependency is needed. Handles RSS 2.0
+    (``<item>`` with a text ``<link>``) and Atom (``<entry>`` with a ``<link>``
+    carrying an ``href`` attribute; prefers ``rel="alternate"``). The employer
+    slot is always ``None`` — a feed has no listing-card employer — so it mirrors
+    the HTML path's tuple shape and lets the JSON-LD/regex employer logic run on
+    the detail page. Malformed XML yields an empty list (treated as a dry source).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    def _localname(tag: str) -> str:
+        # Strip any "{namespace}" prefix ElementTree prepends (Atom uses one).
+        return tag.rsplit("}", 1)[-1].lower()
+
+    entries: List[tuple] = []
+    for node in root.iter():
+        if _localname(node.tag) not in ("item", "entry"):
+            continue
+        title = None
+        link = None
+        for child in node:
+            ctag = _localname(child.tag)
+            if ctag == "title" and title is None:
+                title = (child.text or "").strip()
+            elif ctag == "link":
+                # RSS puts the URL in the element text; Atom in href=. Prefer an
+                # explicit rel="alternate" (the human-facing page) when present.
+                href = (child.get("href") or "").strip()
+                text = (child.text or "").strip()
+                rel = (child.get("rel") or "alternate").lower()
+                if href:
+                    if rel == "alternate" or link is None:
+                        link = href
+                elif text and link is None:
+                    link = text
+        if title and link:
+            entries.append((title, link, None))
+    return entries
+
+
 async def _scrape_source(
     client: httpx.AsyncClient,
     src: Dict,
@@ -1144,21 +1195,29 @@ async def _scrape_source(
         logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
         return [], stats, seen_urls
 
-    soup = BeautifulSoup(listing_resp.text, "html.parser")
-    links = list(soup.select(src["selector"]))
-    stats.links_matched = len(links)
-    # Per-source match count surfaces dead selectors passively in the log —
+    # Two listing shapes feed the same downstream pipeline as a unified list of
+    # (title, href, card_employer) entries: an HTML page parsed with a CSS
+    # selector, or an RSS/Atom feed (format: rss) for sources that dropped their
+    # HTML listing for a JS app but still publish a server-rendered feed.
+    if src.get("format") == "rss":
+        entries = parse_feed_entries(listing_resp.text)
+    else:
+        soup = BeautifulSoup(listing_resp.text, "html.parser")
+        entries = [
+            (extract_link_title(a), a.get("href", ""), extract_card_employer(a))
+            for a in soup.select(src["selector"])
+        ]
+    stats.links_matched = len(entries)
+    # Per-source match count surfaces dead selectors/feeds passively in the log —
     # any source returning 0 matches across consecutive runs is a candidate
     # for removal from the YAML.
-    logger.info(f"{src['name']}: {len(links)} link(s) matched selector")
-    if not links:
+    logger.info(f"{src['name']}: {len(entries)} link(s) matched selector")
+    if not entries:
         return [], stats, seen_urls
 
     candidates = []
     seen_candidate_urls = set()
-    for a in links:
-        raw_title = extract_link_title(a)
-        href = a.get("href", "")
+    for raw_title, href, card_employer in entries:
         if not href or len(raw_title) < 10:
             continue
         url = urljoin(src["url"], href)
@@ -1176,7 +1235,7 @@ async def _scrape_source(
         if url in seen_candidate_urls:
             continue
         seen_candidate_urls.add(url)
-        candidates.append((raw_title, url, extract_card_employer(a)))
+        candidates.append((raw_title, url, card_employer))
 
     stats.candidates = len(candidates)
     if not candidates:

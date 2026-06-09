@@ -65,29 +65,48 @@ sources:
   - name: Dixon Walter
     url: https://www.dixonwalter.co.uk/opportunities/
     selector: "article.opportunities a.showcase__link-stretch"
+  # THE UniJobs (Madgex) — the HTML listing is a JS app, but Madgex still
+  # publishes a server-rendered RSS feed at /unijobs/jobsrss/ that honours a
+  # Keywords query. format: rss makes the scraper parse <item> title/link
+  # instead of a CSS selector. LocationId=164 constrains to the UK (without it
+  # the feed floods with international roles); titles arrive as
+  # "EMPLOYER: Title". Narrow keyword feeds, like the jobs.ac.uk approach.
+  - name: THE UniJobs Director
+    url: https://www.timeshighereducation.com/unijobs/jobsrss/?Keywords=director&LocationId=164&countrycode=GB
+    format: rss
+  - name: THE UniJobs Dean
+    url: https://www.timeshighereducation.com/unijobs/jobsrss/?Keywords=dean&LocationId=164&countrycode=GB
+    format: rss
+  - name: THE UniJobs Registrar
+    url: https://www.timeshighereducation.com/unijobs/jobsrss/?Keywords=registrar&LocationId=164&countrycode=GB
+    format: rss
+  - name: THE UniJobs Vice-Chancellor
+    url: https://www.timeshighereducation.com/unijobs/jobsrss/?Keywords=vice-chancellor&LocationId=164&countrycode=GB
+    format: rss
+  # Minerva Search — the /current-opportunities/ list IS in the server HTML
+  # (each role links to /current-opportunities/<slug>/), it was just behind a
+  # different path than first probed. The anchor text carries a sector-category
+  # prefix (e.g. "Higher Education …") which is harmless noise; the title_gate
+  # still matches the leadership terms within it.
+  - name: Minerva Search
+    url: https://www.minervasearch.com/current-opportunities/
+    selector: "a[href*='/current-opportunities/']"
   #
   # --- Excluded HE exec-search firms (audited June 2026) ---
-  # All of the following render their vacancy lists client-side (JavaScript),
-  # so httpx + BeautifulSoup sees an empty shell — same root cause as Odgers
-  # Berndtson. They each returned 0 links (or fetch failures) and have been
-  # removed rather than left silently dry. Re-adding any of them needs either a
-  # headless-browser fetch path or their underlying JSON/AJAX endpoint.
+  # The following still render their vacancy lists client-side (JavaScript) with
+  # no server-rendered feed or readable endpoint found, so httpx + BeautifulSoup
+  # sees an empty shell — same root cause as Odgers Berndtson. Re-adding any of
+  # them needs a headless-browser fetch path or their underlying JSON/AJAX
+  # endpoint (leads noted below for a future pass).
   #   - Odgers Berndtson — JS-rendered (long-standing exclusion).
-  #   - THE UniJobs (timeshighereducation.com/unijobs) — results render in a JS
-  #     app (#main, "Skip to job results"); nothing in server HTML.
   #   - Perrett Laver — vacancies moved to a plusportal.perrettlaver.com SPA;
-  #     the old candidates.perrettlaver.com/vacancies/ now redirects there and
   #     the marketing site 403s automated requests.
-  #   - Saxton Bampfylde (saxbam.com) — /appointments/ now redirects to a blog
-  #     article; no static roles listing (JS nav, all role URLs 404).
+  #   - Saxton Bampfylde (saxbam.com) — WordPress; roles are a custom post type
+  #     loaded via /wp-admin/admin-ajax.php (action not yet identified).
   #   - Anderson Quigley (andersonquigley.com/apply/) — roles load via JS;
   #     server HTML has ~750 chars of text and no role links.
-  #   - Veredus (veredus.co.uk/opportunities/) — "Load more listings" AJAX;
-  #     opportunities are not in server HTML.
-  #   - Minerva Search (minervasearch.com/current-opportunities/) — opportunity
-  #     list injected by JS; not in server HTML.
-  #   (Dixon Walter was here too, but it is server-rendered — re-enabled above
-  #   once extract_link_title's card-heading title fallback landed.)
+  #   - Veredus (veredus.co.uk/opportunities/) — WordPress + Cloudflare Turnstile;
+  #     "Load more listings" AJAX, opportunities not in server HTML.
 
 weights:
   executive_bonus: 50
