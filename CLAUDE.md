@@ -131,8 +131,9 @@ Coverage focus: `score_job` (including the regression test for the `non-permanen
 ## Known limitations
 
 - Odgers Berndtson excluded — vacancies are JavaScript-rendered, not in HTML source
-- Perrett Laver selector targets vacancy links by href pattern — verify on first run
-- Some job boards may change their HTML structure without notice, breaking selectors
+- Source audit (June 2026): many boards had silently gone dry (selector rot or a move to client-side rendering). The exec-search firms THE UniJobs, Perrett Laver, Saxton Bampfylde, Anderson Quigley, Veredus, Minerva and the boards Harris Hill / Third Sector now render vacancies client-side (JS) and are excluded — see the commented blocks in each profile YAML for per-firm detail. Prospectus and Guardian Jobs return HTTP 403 (anti-bot) and are excluded too. Dixon Walter is server-rendered but puts the title in a card heading, not the link, so it needs a card-heading title fallback in `_scrape_source` before it can be re-enabled. Working static sources after the audit: jobs.ac.uk, Peridot Partners, CharityJob, NFP People, NFP Consulting.
+- Re-enabling a JS-rendered source needs either a headless-browser fetch path or the site's underlying JSON/AJAX endpoint — the current scraper is httpx + BeautifulSoup only
+- Some job boards may change their HTML structure without notice, breaking selectors — the per-source funnel panel in each email flags any source showing 0 links
 - `Retry-After` HTTP-date form is intentionally not supported (clock-skew not worth the complexity)
 - jobs.ac.uk (June 2026): RSS feeds retired and the old job-type taxonomy removed. `/search/<slug>` now returns the full unfiltered set (page 1 only) and the old `.j-search-result__title a` selector matches nothing. The agent now uses the server-rendered **keyword search** (`/search/?keywords=…`) with the title selector `.j-search-result__text > a`. The search query (keyword or `academicDisciplineFacet[]`) must be in every request — jobs.ac.uk otherwise tracks a stateful per-client "current search" and concurrent fetches bleed together. Results are newest-first; `pageSize` is capped at 25 and pages step `startIndex` by 25.
 

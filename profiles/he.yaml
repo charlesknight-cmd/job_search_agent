@@ -50,45 +50,37 @@ sources:
   - name: jobs.ac.uk Pro-Vice-Chancellor
     url: https://www.jobs.ac.uk/search/?keywords=pro-vice-chancellor&sortOrder=1&pageSize=25&startIndex=1
     selector: ".j-search-result__text > a"
-  - name: THE UniJobs
-    url: https://www.timeshighereducation.com/unijobs/listings/united-kingdom/
-    selector: ".job-results__title a"
+  # Peridot Partners — listing page is server-rendered. Title links sit in an
+  # <h2> and point at /jobs/<slug> (the old ".card-title a" class is gone, so
+  # the source had been silently dry). Verified June 2026: 8 titles.
   - name: Peridot Partners
     url: https://www.peridotpartners.co.uk/job-role/education-executive-roles/
-    selector: ".card-title a"
-  # Odgers Berndtson excluded: vacancies are JavaScript-rendered, not in HTML source
-  # Perrett Laver: selector targets vacancy links by href pattern — verify on first run
-  - name: Perrett Laver
-    url: https://candidates.perrettlaver.com/vacancies/
-    selector: "a[href*='/vacancies/']"
-  # New HE exec-search firms — selectors are defensive multi-pattern OR-lists
-  # because each firm's URL slug is a guess. Watch the per-source panel at
-  # the bottom of each email: any source showing 0 links across consecutive
-  # runs is likely JS-rendered (like Odgers Berndtson) and can be dropped.
-  # Saxton Bampfylde — try the obvious /appointment/, /appointments/ slugs.
-  - name: Saxton Bampfylde
-    url: https://www.saxbam.com/appointments/
-    selector: "a[href*='/appointment/'], a[href*='/appointments/']"
-  # Anderson Quigley — broaden to opportunity slug too, in case singular form
-  # is used per-vacancy.
-  - name: Anderson Quigley
-    url: https://www.andersonquigley.com/opportunities/
-    selector: "a[href*='/opportunity/'], a[href*='/opportunities/']"
-  # Dixon Walter — small WordPress site; try both singular vacancy and
-  # generic position slugs.
-  - name: Dixon Walter
-    url: https://www.dixonwalter.co.uk/vacancies/
-    selector: "a[href*='/vacancy/'], a[href*='/position/']"
-  # Veredus — public-sector exec search; /job/ and /jobs/ are both plausible
-  # detail-page patterns on WordPress installations.
-  - name: Veredus
-    url: https://www.veredus.co.uk/jobs/
-    selector: "a[href*='/job/'], a[href*='/jobs/']"
-  # Minerva Search — boutique HE/charity exec search; try position/positions
-  # plus a generic search slug fallback.
-  - name: Minerva Search
-    url: https://minervasearch.com/positions/
-    selector: "a[href*='/position/'], a[href*='/positions/'], a[href*='/search/']"
+    selector: "h2 a[href*='/jobs/']"
+  #
+  # --- Excluded HE exec-search firms (audited June 2026) ---
+  # All of the following render their vacancy lists client-side (JavaScript),
+  # so httpx + BeautifulSoup sees an empty shell — same root cause as Odgers
+  # Berndtson. They each returned 0 links (or fetch failures) and have been
+  # removed rather than left silently dry. Re-adding any of them needs either a
+  # headless-browser fetch path or their underlying JSON/AJAX endpoint.
+  #   - Odgers Berndtson — JS-rendered (long-standing exclusion).
+  #   - THE UniJobs (timeshighereducation.com/unijobs) — results render in a JS
+  #     app (#main, "Skip to job results"); nothing in server HTML.
+  #   - Perrett Laver — vacancies moved to a plusportal.perrettlaver.com SPA;
+  #     the old candidates.perrettlaver.com/vacancies/ now redirects there and
+  #     the marketing site 403s automated requests.
+  #   - Saxton Bampfylde (saxbam.com) — /appointments/ now redirects to a blog
+  #     article; no static roles listing (JS nav, all role URLs 404).
+  #   - Anderson Quigley (andersonquigley.com/apply/) — roles load via JS;
+  #     server HTML has ~750 chars of text and no role links.
+  #   - Veredus (veredus.co.uk/opportunities/) — "Load more listings" AJAX;
+  #     opportunities are not in server HTML.
+  #   - Minerva Search (minervasearch.com/current-opportunities/) — opportunity
+  #     list injected by JS; not in server HTML.
+  #   - Dixon Walter (dixonwalter.co.uk/opportunities/) — server-rendered, BUT
+  #     the card title is an <h4>/<span>, not the (empty) stretched <a>, so the
+  #     link-text-as-title scraper can't read it. Needs a card-heading title
+  #     fallback in _scrape_source before it can be re-enabled.
 
 weights:
   executive_bonus: 50

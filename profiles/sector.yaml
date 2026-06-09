@@ -17,19 +17,21 @@ sources:
   - name: jobs.ac.uk Chief Executive
     url: https://www.jobs.ac.uk/search/?keywords=chief+executive&sortOrder=1&pageSize=25&startIndex=1
     selector: ".j-search-result__text > a"
+  # CharityJob — server-rendered; job-title links point at /jobs/<org>/<role>.
+  # The old "h3 a" selector matches nothing now (see charity.yaml for detail).
   - name: CharityJob Policy
     url: https://www.charityjob.co.uk/jobs?keywords=director+policy+education+sector&category=policy-public-affairs
-    selector: "h3 a"
+    selector: "a[href*='/jobs/']"
   - name: CharityJob Education
     url: https://www.charityjob.co.uk/jobs?keywords=director+education+learning&category=education
-    selector: "h3 a"
+    selector: "a[href*='/jobs/']"
   - name: NFP People
     url: https://careers.nfp-people.co.uk/jobs/
     selector: "a[href*='/job/']"
-  - name: Prospectus
-    url: https://www.prospect-us.co.uk/job/
-    selector: "a[href*='/job/']"
-  # Guardian Jobs Education excluded: returns 403 Forbidden (anti-bot blocking)
+  # Excluded (audited June 2026):
+  #   - Guardian Jobs Education — returns 403 Forbidden (anti-bot blocking).
+  #   - Prospectus (prospect-us.co.uk/job/) — also returns HTTP 403 to
+  #     automated requests now; excluded for the same reason.
 weights:
   executive_bonus: 50
   director_bonus: 35
