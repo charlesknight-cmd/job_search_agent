@@ -91,6 +91,14 @@ sources:
   - name: Minerva Search
     url: https://www.minervasearch.com/current-opportunities/
     selector: "a[href*='/current-opportunities/']"
+  # Veredus — public-sector exec search on WordPress + WP Job Manager. The HTML
+  # listing is JS ("Load more" AJAX, behind Cloudflare Turnstile), but the
+  # plugin still publishes a server-rendered jobs feed (post_type=job_listing).
+  # Detail links are /job/<slug>/. Surfaces senior interim roles (e.g.
+  # "Interim COO & Registrar").
+  - name: Veredus
+    url: https://www.veredus.co.uk/?post_type=job_listing&feed=rss2
+    format: rss
   #
   # --- Excluded HE exec-search firms (audited June 2026) ---
   # The following still render their vacancy lists client-side (JavaScript) with
@@ -101,12 +109,12 @@ sources:
   #   - Odgers Berndtson — JS-rendered (long-standing exclusion).
   #   - Perrett Laver — vacancies moved to a plusportal.perrettlaver.com SPA;
   #     the marketing site 403s automated requests.
-  #   - Saxton Bampfylde (saxbam.com) — WordPress; roles are a custom post type
-  #     loaded via /wp-admin/admin-ajax.php (action not yet identified).
+  #   - Saxton Bampfylde (saxbam.com) — WordPress, but wp-json exposes only a
+  #     'people' post type; roles load via /wp-admin/admin-ajax.php (action not
+  #     yet identified). No jobs feed or REST collection found.
   #   - Anderson Quigley (andersonquigley.com/apply/) — roles load via JS;
   #     server HTML has ~750 chars of text and no role links.
-  #   - Veredus (veredus.co.uk/opportunities/) — WordPress + Cloudflare Turnstile;
-  #     "Load more listings" AJAX, opportunities not in server HTML.
+  #   (Veredus was here too — re-enabled above via its WP Job Manager jobs feed.)
 
 weights:
   executive_bonus: 50
