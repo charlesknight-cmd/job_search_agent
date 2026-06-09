@@ -24,9 +24,32 @@ filters:
   daily_window_hours: 72
 
 sources:
-  - name: jobs.ac.uk
-    url: https://www.jobs.ac.uk/search/senior-management
-    selector: ".j-search-result__title a"
+  # jobs.ac.uk (observed June 2026): RSS feeds retired and the old job-type
+  # taxonomy removed, so /search/<slug> now returns the full unfiltered set
+  # (page 1 only) and the old ".j-search-result__title a" selector matches
+  # nothing. The working path is the server-rendered keyword search with the
+  # query in EVERY request (jobs.ac.uk tracks a stateful per-client "current
+  # search" otherwise, so concurrent fetches bleed). Results are newest-first;
+  # pageSize is capped at 25 and pages step startIndex by 25. Title cards live
+  # in div.j-search-result__result; the title link is the first <a> in
+  # .j-search-result__text and points at a stable /job/<ID> URL. Keyword
+  # queries are deliberately narrow — the title_gate + scoring do the final
+  # filtering, so a little keyword fuzziness is harmless. "director" is broad,
+  # so it paginates; the rest fit on one page.
+  - name: jobs.ac.uk Director
+    url: https://www.jobs.ac.uk/search/?keywords=director&sortOrder=1&pageSize=25&startIndex=1
+    selector: ".j-search-result__text > a"
+    pages: 3
+  - name: jobs.ac.uk Dean
+    url: https://www.jobs.ac.uk/search/?keywords=dean&sortOrder=1&pageSize=25&startIndex=1
+    selector: ".j-search-result__text > a"
+    pages: 2
+  - name: jobs.ac.uk Registrar
+    url: https://www.jobs.ac.uk/search/?keywords=registrar&sortOrder=1&pageSize=25&startIndex=1
+    selector: ".j-search-result__text > a"
+  - name: jobs.ac.uk Pro-Vice-Chancellor
+    url: https://www.jobs.ac.uk/search/?keywords=pro-vice-chancellor&sortOrder=1&pageSize=25&startIndex=1
+    selector: ".j-search-result__text > a"
   - name: THE UniJobs
     url: https://www.timeshighereducation.com/unijobs/listings/united-kingdom/
     selector: ".job-results__title a"

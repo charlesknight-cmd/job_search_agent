@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import random
 import re
@@ -10,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 
 import httpx
 import yaml
@@ -1018,6 +1019,90 @@ async def _scrape_source(
     return scored, stats, seen_urls
 
 
+# --- SOURCE PAGINATION ---
+# Some boards return one short page per request and paginate the rest. The
+# source model is otherwise one-URL-one-fetch, so paginated sources are
+# expanded into one concrete source per page before scraping. Defaults match
+# jobs.ac.uk: page size 25, 1-based ``startIndex`` stepping 1, 26, 51, ….
+DEFAULT_PAGE_PARAM = "startIndex"
+DEFAULT_PAGE_SIZE = 25
+
+
+def expand_sources(sources: List[Dict]) -> List[Dict]:
+    """Flatten any source that requests pagination into one source per page.
+
+    A source opts in with ``pages: N`` (N > 1). Pagination varies a single query
+    parameter — ``page_param`` (default ``startIndex``) — starting from its value
+    in ``url`` (default 1 if absent) and stepping by ``page_size`` (default 25).
+
+    All pages keep the source's ``name`` so DB attribution and stale-marking stay
+    coherent (the ``source`` column doubles as the user's pipeline); the per-source
+    funnel panel aggregates the pages back into one row (see ``_aggregate_stats``).
+
+    jobs.ac.uk caps ``pageSize`` at 25 and only paginates reliably when the search
+    query (``keywords`` or ``academicDisciplineFacet[]``) is present in *every*
+    request — otherwise pagination tracks a stateful per-client "current search"
+    and concurrent fetches bleed together. So the query must live in the base
+    ``url``; this expander preserves it on every page. Sources without ``pages``
+    (or ``pages <= 1``) pass through unchanged.
+    """
+    expanded: List[Dict] = []
+    for src in sources:
+        pages = int(src.get("pages", 1) or 1)
+        if pages <= 1:
+            expanded.append(src)
+            continue
+        page_param = src.get("page_param", DEFAULT_PAGE_PARAM)
+        page_size = int(src.get("page_size", DEFAULT_PAGE_SIZE))
+        parsed = urlparse(src["url"])
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        start = 1
+        for k, v in query:
+            if k == page_param:
+                try:
+                    start = int(v)
+                except ValueError:
+                    start = 1
+                break
+        base_query = [(k, v) for k, v in query if k != page_param]
+        for i in range(pages):
+            page_query = base_query + [(page_param, str(start + i * page_size))]
+            # safe="[]" keeps facet keys like academicDisciplineFacet[] literal —
+            # quote_plus would percent-encode the brackets.
+            page_url = urlunparse(
+                parsed._replace(query=urlencode(page_query, safe="[]"))
+            )
+            page_src = {
+                k: v for k, v in src.items()
+                if k not in ("pages", "page_param", "page_size")
+            }
+            page_src["url"] = page_url
+            expanded.append(page_src)
+    return expanded
+
+
+def _aggregate_stats(stats: List[SourceStats]) -> List[SourceStats]:
+    """Merge per-page SourceStats sharing a name into one funnel-panel row.
+
+    Pagination expands a configured source into one fetch per page, but the email
+    should still show one row per source. Counts sum; a source is flagged
+    ``listing_failed`` only if *every* page failed — a partial-page failure still
+    yielded jobs, so the selector isn't actually dead.
+    """
+    merged: Dict[str, SourceStats] = {}
+    order: List[str] = []
+    for s in stats:
+        if s.name not in merged:
+            merged[s.name] = SourceStats(name=s.name, listing_failed=True)
+            order.append(s.name)
+        m = merged[s.name]
+        m.links_matched += s.links_matched
+        m.candidates += s.candidates
+        m.new_scored += s.new_scored
+        m.listing_failed = m.listing_failed and s.listing_failed
+    return [merged[n] for n in order]
+
+
 async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
     cfg = PROFILES[profile_key]
     if dry_run:
@@ -1028,18 +1113,21 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True
         ) as client:
+            # Expand paginated sources (e.g. jobs.ac.uk keyword queries that span
+            # several pages) into one concrete per-page source first.
+            sources = expand_sources(cfg["sources"])
             # Sources hit different origins, so we run them concurrently;
             # per-source semaphore inside _scrape_source keeps detail-fetch
             # load polite per host. return_exceptions so one broken source
             # cannot bring down the whole run.
             source_results = await asyncio.gather(
-                *[_scrape_source(client, src, cfg, db) for src in cfg["sources"]],
+                *[_scrape_source(client, src, cfg, db) for src in sources],
                 return_exceptions=True,
             )
 
         source_stats: List[SourceStats] = []
         successful_sources: List[str] = []
-        for src, result in zip(cfg["sources"], source_results):
+        for src, result in zip(sources, source_results):
             if isinstance(result, Exception):
                 logger.error(f"Error scraping {src['name']}: {result}")
                 source_stats.append(SourceStats(name=src["name"], listing_failed=True))
@@ -1076,7 +1164,7 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             recent,
             f"{'Weekly' if weekly else 'Daily'} {cfg['label']} Report",
             fname,
-            source_stats=source_stats,
+            source_stats=_aggregate_stats(source_stats),
             window_hours=window_hours,
         )
         logger.info(f"Report written: {fname} ({len(recent)} roles)")

@@ -134,6 +134,7 @@ Coverage focus: `score_job` (including the regression test for the `non-permanen
 - Perrett Laver selector targets vacancy links by href pattern — verify on first run
 - Some job boards may change their HTML structure without notice, breaking selectors
 - `Retry-After` HTTP-date form is intentionally not supported (clock-skew not worth the complexity)
+- jobs.ac.uk (June 2026): RSS feeds retired and the old job-type taxonomy removed. `/search/<slug>` now returns the full unfiltered set (page 1 only) and the old `.j-search-result__title a` selector matches nothing. The agent now uses the server-rendered **keyword search** (`/search/?keywords=…`) with the title selector `.j-search-result__text > a`. The search query (keyword or `academicDisciplineFacet[]`) must be in every request — jobs.ac.uk otherwise tracks a stateful per-client "current search" and concurrent fetches bleed together. Results are newest-first; `pageSize` is capped at 25 and pages step `startIndex` by 25.
 
 ---
 
@@ -146,4 +147,5 @@ Coverage focus: `score_job` (including the regression test for the `non-permanen
 - Search parameters live in YAML under `profiles/`; non-Python users can edit them without touching code
 - Keep scoring logic transparent and rule-based — no ML
 - When adding a new source, leave a comment in the YAML explaining why the selector was chosen so future maintainers can revalidate when the page structure shifts
+- Multi-page sources: a source may set `pages: N` (optional `page_param`, default `startIndex`; `page_size`, default 25) to fetch N pages. `expand_sources()` flattens it into one fetch per page before scraping; all pages keep the source `name` (so DB attribution/stale-marking stay coherent) and the funnel panel re-aggregates them into one row. The query that makes pagination work must live in the base `url`.
 - Pre-commit hooks (Black, Flake8, basic hygiene) configured in `.pre-commit-config.yaml`
