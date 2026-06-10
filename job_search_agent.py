@@ -1,16 +1,18 @@
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import random
 import re
 import sqlite3
 import textwrap
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qsl, urlencode, urlunparse
 
 import httpx
 import yaml
@@ -249,6 +251,162 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
                     return result
 
     return source_name
+
+
+# --- STRUCTURED DATA (schema.org JobPosting JSON-LD) ---
+# Many job boards embed a schema.org ``JobPosting`` block as JSON-LD in a
+# ``<script type="application/ld+json">`` tag. It carries the true employer
+# (``hiringOrganization.name``), salary (``baseSalary``), and location
+# (``jobLocation``) far more reliably than scraping rendered HTML — and it
+# benefits *every* source, not just jobs.ac.uk. We use it as a high-priority
+# signal and keep the regex heuristics as a fallback for sites without it.
+_SALARY_YEAR_UNITS = {"", "YEAR", "YEARLY", "ANNUM", "ANNUAL", "ANNUALLY"}
+
+
+def _coerce_number(value) -> Optional[float]:
+    """Best-effort parse of a JSON-LD numeric field (int, float, or string)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        cleaned = value.replace(",", "").replace("£", "").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def _find_jobposting(node):
+    """Recursively locate a ``JobPosting`` object within parsed JSON-LD.
+
+    Handles the common shapes: a bare object, a list of objects, and the
+    ``@graph`` / ``mainEntity`` wrappers. ``@type`` may be a string or a list.
+    """
+    if isinstance(node, dict):
+        types = node.get("@type")
+        types = types if isinstance(types, list) else [types]
+        if "JobPosting" in types:
+            return node
+        for key in ("@graph", "mainEntity", "itemListElement"):
+            if key in node:
+                found = _find_jobposting(node[key])
+                if found:
+                    return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_jobposting(item)
+            if found:
+                return found
+    return None
+
+
+def _jsonld_salary(base) -> Optional[int]:
+    """Extract an annual GBP salary from a ``baseSalary`` MonetaryAmount.
+
+    Picks the top of a min/max band (consistent with ``extract_salary``).
+    Skips non-annual figures (hourly/daily rates) and sub-floor values so an
+    hourly rate never masquerades as a salary.
+    """
+    if not isinstance(base, dict):
+        return None
+    value = base.get("value")
+    candidates: List[float] = []
+    if isinstance(value, dict):
+        unit = value.get("unitText")
+        if isinstance(unit, str) and unit.upper() not in _SALARY_YEAR_UNITS:
+            return None
+        for key in ("value", "maxValue", "minValue"):
+            num = _coerce_number(value.get(key))
+            if num is not None:
+                candidates.append(num)
+    else:
+        num = _coerce_number(value)
+        if num is not None:
+            candidates.append(num)
+    if not candidates:
+        return None
+    best = max(candidates)
+    if best < MIN_PLAUSIBLE_SALARY:
+        return None
+    return int(best)
+
+
+def _jsonld_location(loc) -> str:
+    """Build a human-readable location string from a ``jobLocation`` Place."""
+    if isinstance(loc, list):
+        for item in loc:
+            text = _jsonld_location(item)
+            if text:
+                return text
+        return ""
+    if not isinstance(loc, dict):
+        return ""
+    address = loc.get("address")
+    if isinstance(address, str):
+        return address.strip()
+    parts = []
+    if isinstance(address, dict):
+        for key in ("addressLocality", "addressRegion", "addressCountry"):
+            v = address.get(key)
+            if isinstance(v, dict):
+                v = v.get("name")
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+    return ", ".join(parts)
+
+
+def parse_jobposting_jsonld(page_html: str) -> Dict:
+    """Parse a schema.org ``JobPosting`` JSON-LD block from a detail page.
+
+    Returns a dict with any of the normalised keys ``employer``, ``salary``,
+    ``location``, ``employment_type``, ``valid_through`` that were found, or an
+    empty dict when no parsable ``JobPosting`` block is present.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    for tag in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = tag.string or tag.get_text()
+        if not raw or not raw.strip():
+            continue
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        posting = _find_jobposting(data)
+        if not posting:
+            continue
+
+        out: Dict = {}
+        org = posting.get("hiringOrganization")
+        if isinstance(org, dict):
+            name = org.get("name")
+            if isinstance(name, str) and name.strip():
+                out["employer"] = name.strip()
+        elif isinstance(org, str) and org.strip():
+            out["employer"] = org.strip()
+
+        salary = _jsonld_salary(posting.get("baseSalary"))
+        if salary is not None:
+            out["salary"] = salary
+
+        location = _jsonld_location(posting.get("jobLocation"))
+        if location:
+            out["location"] = location
+
+        et = posting.get("employmentType")
+        if isinstance(et, list):
+            et = " ".join(str(x) for x in et if x)
+        if isinstance(et, str) and et.strip():
+            out["employment_type"] = et.strip()
+
+        vt = posting.get("validThrough")
+        if isinstance(vt, str) and vt.strip():
+            out["valid_through"] = vt.strip()
+
+        if out:
+            return out
+    return {}
 
 
 # --- SCORING ---
@@ -914,6 +1072,103 @@ DETAIL_FETCH_CONCURRENCY = 3
 DETAIL_FETCH_JITTER = (0.3, 0.8)
 
 
+def extract_card_employer(link) -> Optional[str]:
+    """Pull the employer from the listing card wrapping a title link.
+
+    jobs.ac.uk wraps each result in ``.j-search-result__result`` and names the
+    institution in ``.j-search-result__employer``. Reading it at listing time
+    gives a reliable employer without a second request — useful as a fallback
+    for boards that omit JSON-LD on the detail page. Returns ``None`` when no
+    recognisable employer node is found.
+    """
+    card = link.find_parent(class_="j-search-result__result")
+    if card is None:
+        return None
+    emp = card.select_one(".j-search-result__employer")
+    if emp is None:
+        return None
+    text = emp.get_text(" ", strip=True)
+    return text or None
+
+
+def extract_link_title(link) -> str:
+    """Return the job title for a listing anchor, with a card-heading fallback.
+
+    Most boards put the title in the anchor's own text, so we use that when it
+    is present. Some sites use a "stretched link" card layout, where the
+    clickable ``<a>`` is an empty overlay covering the card and the title lives
+    in a sibling heading (e.g. Dixon Walter renders an empty
+    ``a.showcase__link-stretch`` next to an ``<h4>``). When the anchor text is
+    empty or too short to be a real title, fall back to the first heading
+    (``<h1>``–``<h4>``) inside the nearest containing card
+    (``<article>``/``<li>``/``<div>``). The guard means sources where the
+    anchor text *is* the title are unaffected.
+    """
+    anchor_text = link.get_text(" ", strip=True)
+    if len(anchor_text) >= 10:
+        return anchor_text
+
+    card = link.find_parent(["article", "li", "div"])
+    if card is not None:
+        heading = card.find(["h1", "h2", "h3", "h4"])
+        if heading is not None:
+            heading_text = heading.get_text(" ", strip=True)
+            if heading_text:
+                return heading_text
+
+    return anchor_text
+
+
+def parse_feed_entries(xml_text: str) -> List[tuple]:
+    """Parse ``(title, link, employer)`` tuples from an RSS or Atom feed.
+
+    Some boards dropped their HTML listings for a JS app but still publish a
+    server-rendered feed (e.g. THE UniJobs / Madgex exposes a ``jobsrss``
+    endpoint that honours a ``Keywords`` query). Parsing the feed lets us keep
+    those sources without a headless browser.
+
+    Uses stdlib ``ElementTree`` so no lxml dependency is needed. Handles RSS 2.0
+    (``<item>`` with a text ``<link>``) and Atom (``<entry>`` with a ``<link>``
+    carrying an ``href`` attribute; prefers ``rel="alternate"``). The employer
+    slot is always ``None`` — a feed has no listing-card employer — so it mirrors
+    the HTML path's tuple shape and lets the JSON-LD/regex employer logic run on
+    the detail page. Malformed XML yields an empty list (treated as a dry source).
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    def _localname(tag: str) -> str:
+        # Strip any "{namespace}" prefix ElementTree prepends (Atom uses one).
+        return tag.rsplit("}", 1)[-1].lower()
+
+    entries: List[tuple] = []
+    for node in root.iter():
+        if _localname(node.tag) not in ("item", "entry"):
+            continue
+        title = None
+        link = None
+        for child in node:
+            ctag = _localname(child.tag)
+            if ctag == "title" and title is None:
+                title = (child.text or "").strip()
+            elif ctag == "link":
+                # RSS puts the URL in the element text; Atom in href=. Prefer an
+                # explicit rel="alternate" (the human-facing page) when present.
+                href = (child.get("href") or "").strip()
+                text = (child.text or "").strip()
+                rel = (child.get("rel") or "alternate").lower()
+                if href:
+                    if rel == "alternate" or link is None:
+                        link = href
+                elif text and link is None:
+                    link = text
+        if title and link:
+            entries.append((title, link, None))
+    return entries
+
+
 async def _scrape_source(
     client: httpx.AsyncClient,
     src: Dict,
@@ -940,21 +1195,29 @@ async def _scrape_source(
         logger.info(f"{src['name']}: listing fetch failed — 0 link(s) processed")
         return [], stats, seen_urls
 
-    soup = BeautifulSoup(listing_resp.text, "html.parser")
-    links = list(soup.select(src["selector"]))
-    stats.links_matched = len(links)
-    # Per-source match count surfaces dead selectors passively in the log —
+    # Two listing shapes feed the same downstream pipeline as a unified list of
+    # (title, href, card_employer) entries: an HTML page parsed with a CSS
+    # selector, or an RSS/Atom feed (format: rss) for sources that dropped their
+    # HTML listing for a JS app but still publish a server-rendered feed.
+    if src.get("format") == "rss":
+        entries = parse_feed_entries(listing_resp.text)
+    else:
+        soup = BeautifulSoup(listing_resp.text, "html.parser")
+        entries = [
+            (extract_link_title(a), a.get("href", ""), extract_card_employer(a))
+            for a in soup.select(src["selector"])
+        ]
+    stats.links_matched = len(entries)
+    # Per-source match count surfaces dead selectors/feeds passively in the log —
     # any source returning 0 matches across consecutive runs is a candidate
     # for removal from the YAML.
-    logger.info(f"{src['name']}: {len(links)} link(s) matched selector")
-    if not links:
+    logger.info(f"{src['name']}: {len(entries)} link(s) matched selector")
+    if not entries:
         return [], stats, seen_urls
 
     candidates = []
     seen_candidate_urls = set()
-    for a in links:
-        raw_title = a.get_text(" ").strip()
-        href = a.get("href", "")
+    for raw_title, href, card_employer in entries:
         if not href or len(raw_title) < 10:
             continue
         url = urljoin(src["url"], href)
@@ -972,7 +1235,7 @@ async def _scrape_source(
         if url in seen_candidate_urls:
             continue
         seen_candidate_urls.add(url)
-        candidates.append((raw_title, url))
+        candidates.append((raw_title, url, card_employer))
 
     stats.candidates = len(candidates)
     if not candidates:
@@ -980,7 +1243,9 @@ async def _scrape_source(
 
     sem = asyncio.Semaphore(DETAIL_FETCH_CONCURRENCY)
 
-    async def fetch_and_score(raw_title: str, url: str) -> Optional[Job]:
+    async def fetch_and_score(
+        raw_title: str, url: str, card_employer: Optional[str]
+    ) -> Optional[Job]:
         async with sem:
             await asyncio.sleep(random.uniform(*DETAIL_FETCH_JITTER))
             det = await fetch_with_retry(client, url)
@@ -994,14 +1259,33 @@ async def _scrape_source(
                 fetched_at=datetime.now(timezone.utc).isoformat(),
             )
             job.description = extract_description(det.text)
-            job.employer = extract_employer(raw_title, job.description, src["name"])
+            # Employer priority: structured JSON-LD > listing card > regex.
+            # The first two are reliable; the regex heuristic and source-name
+            # fallback only fire when neither is present.
+            posting = parse_jobposting_jsonld(det.text)
+            job.employer = (
+                posting.get("employer")
+                or card_employer
+                or extract_employer(raw_title, job.description, src["name"])
+            )
+            # Fold structured location and salary into the scored text so the
+            # geography and salary signals benefit even when the rendered
+            # description omits them. extract_salary picks up the appended
+            # "£NNNNN" via its bare-figure form; geography matches the location.
+            extras = []
+            if posting.get("location"):
+                extras.append(posting["location"])
+            if posting.get("salary"):
+                extras.append(f"£{posting['salary']}")
+            if extras:
+                job.description = f"{job.description} {' '.join(extras)}"
             job.fingerprint = hashlib.sha256(
                 f"{raw_title}{url}".encode()
             ).hexdigest()
             return score_job(job, cfg)
 
     results = await asyncio.gather(
-        *[fetch_and_score(t, u) for t, u in candidates],
+        *[fetch_and_score(t, u, e) for t, u, e in candidates],
         return_exceptions=True,
     )
 
@@ -1018,6 +1302,90 @@ async def _scrape_source(
     return scored, stats, seen_urls
 
 
+# --- SOURCE PAGINATION ---
+# Some boards return one short page per request and paginate the rest. The
+# source model is otherwise one-URL-one-fetch, so paginated sources are
+# expanded into one concrete source per page before scraping. Defaults match
+# jobs.ac.uk: page size 25, 1-based ``startIndex`` stepping 1, 26, 51, ….
+DEFAULT_PAGE_PARAM = "startIndex"
+DEFAULT_PAGE_SIZE = 25
+
+
+def expand_sources(sources: List[Dict]) -> List[Dict]:
+    """Flatten any source that requests pagination into one source per page.
+
+    A source opts in with ``pages: N`` (N > 1). Pagination varies a single query
+    parameter — ``page_param`` (default ``startIndex``) — starting from its value
+    in ``url`` (default 1 if absent) and stepping by ``page_size`` (default 25).
+
+    All pages keep the source's ``name`` so DB attribution and stale-marking stay
+    coherent (the ``source`` column doubles as the user's pipeline); the per-source
+    funnel panel aggregates the pages back into one row (see ``_aggregate_stats``).
+
+    jobs.ac.uk caps ``pageSize`` at 25 and only paginates reliably when the search
+    query (``keywords`` or ``academicDisciplineFacet[]``) is present in *every*
+    request — otherwise pagination tracks a stateful per-client "current search"
+    and concurrent fetches bleed together. So the query must live in the base
+    ``url``; this expander preserves it on every page. Sources without ``pages``
+    (or ``pages <= 1``) pass through unchanged.
+    """
+    expanded: List[Dict] = []
+    for src in sources:
+        pages = int(src.get("pages", 1) or 1)
+        if pages <= 1:
+            expanded.append(src)
+            continue
+        page_param = src.get("page_param", DEFAULT_PAGE_PARAM)
+        page_size = int(src.get("page_size", DEFAULT_PAGE_SIZE))
+        parsed = urlparse(src["url"])
+        query = parse_qsl(parsed.query, keep_blank_values=True)
+        start = 1
+        for k, v in query:
+            if k == page_param:
+                try:
+                    start = int(v)
+                except ValueError:
+                    start = 1
+                break
+        base_query = [(k, v) for k, v in query if k != page_param]
+        for i in range(pages):
+            page_query = base_query + [(page_param, str(start + i * page_size))]
+            # safe="[]" keeps facet keys like academicDisciplineFacet[] literal —
+            # quote_plus would percent-encode the brackets.
+            page_url = urlunparse(
+                parsed._replace(query=urlencode(page_query, safe="[]"))
+            )
+            page_src = {
+                k: v for k, v in src.items()
+                if k not in ("pages", "page_param", "page_size")
+            }
+            page_src["url"] = page_url
+            expanded.append(page_src)
+    return expanded
+
+
+def _aggregate_stats(stats: List[SourceStats]) -> List[SourceStats]:
+    """Merge per-page SourceStats sharing a name into one funnel-panel row.
+
+    Pagination expands a configured source into one fetch per page, but the email
+    should still show one row per source. Counts sum; a source is flagged
+    ``listing_failed`` only if *every* page failed — a partial-page failure still
+    yielded jobs, so the selector isn't actually dead.
+    """
+    merged: Dict[str, SourceStats] = {}
+    order: List[str] = []
+    for s in stats:
+        if s.name not in merged:
+            merged[s.name] = SourceStats(name=s.name, listing_failed=True)
+            order.append(s.name)
+        m = merged[s.name]
+        m.links_matched += s.links_matched
+        m.candidates += s.candidates
+        m.new_scored += s.new_scored
+        m.listing_failed = m.listing_failed and s.listing_failed
+    return [merged[n] for n in order]
+
+
 async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False):
     cfg = PROFILES[profile_key]
     if dry_run:
@@ -1028,18 +1396,21 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             headers={"User-Agent": USER_AGENT},
             follow_redirects=True
         ) as client:
+            # Expand paginated sources (e.g. jobs.ac.uk keyword queries that span
+            # several pages) into one concrete per-page source first.
+            sources = expand_sources(cfg["sources"])
             # Sources hit different origins, so we run them concurrently;
             # per-source semaphore inside _scrape_source keeps detail-fetch
             # load polite per host. return_exceptions so one broken source
             # cannot bring down the whole run.
             source_results = await asyncio.gather(
-                *[_scrape_source(client, src, cfg, db) for src in cfg["sources"]],
+                *[_scrape_source(client, src, cfg, db) for src in sources],
                 return_exceptions=True,
             )
 
         source_stats: List[SourceStats] = []
         successful_sources: List[str] = []
-        for src, result in zip(cfg["sources"], source_results):
+        for src, result in zip(sources, source_results):
             if isinstance(result, Exception):
                 logger.error(f"Error scraping {src['name']}: {result}")
                 source_stats.append(SourceStats(name=src["name"], listing_failed=True))
@@ -1076,7 +1447,7 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
             recent,
             f"{'Weekly' if weekly else 'Daily'} {cfg['label']} Report",
             fname,
-            source_stats=source_stats,
+            source_stats=_aggregate_stats(source_stats),
             window_hours=window_hours,
         )
         logger.info(f"Report written: {fname} ({len(recent)} roles)")

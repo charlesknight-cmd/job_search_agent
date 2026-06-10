@@ -7,30 +7,33 @@ filters:
   salary_target: 100000
   remote_salary_floor: 70000
 sources:
+  # CharityJob — server-rendered. Job-title links point at /jobs/<org>/<role>;
+  # the old "h3 a" selector matches nothing now (the source had been silently
+  # dry). a[href*='/jobs/'] catches the title links; nav/category links like
+  # /jobs or /jobs/fundraising are dropped by the title_gate, and the
+  # responsive mobile/desktop title duplicates collapse on URL dedup.
   - name: CharityJob CEO
     url: https://www.charityjob.co.uk/chief-executive-officer-jobs
-    selector: "h3 a"
+    selector: "a[href*='/jobs/']"
   - name: CharityJob Director
     url: https://www.charityjob.co.uk/jobs?keywords=director+of+education+policy+programmes&category=director
-    selector: "h3 a"
-  - name: Prospectus
-    url: https://www.prospect-us.co.uk/job/
-    selector: "a[href*='/job/']"
+    selector: "a[href*='/jobs/']"
   - name: NFP People
     url: https://careers.nfp-people.co.uk/jobs/
     selector: "a[href*='/job/']"
+  # NFP Consulting — job cards are <article> elements with a single stretched
+  # title link; the old ".job-title a" class is gone. Verified June 2026: 79.
   - name: NFP Consulting
     url: https://nfpconsulting.co.uk/jobs
-    selector: ".job-title a"
-  - name: Harris Hill
-    url: https://www.harrishill.co.uk/jobs/?category=chief-executive
-    selector: ".job-listing__title a"
-  - name: Harris Hill Director
-    url: https://www.harrishill.co.uk/jobs/?category=director
-    selector: ".job-listing__title a"
-  - name: Third Sector Jobs
-    url: https://jobs.thirdsector.co.uk/jobs/chief-executive/
-    selector: "h3 a"
+    selector: "article a"
+  #
+  # --- Excluded charity sources (audited June 2026) ---
+  #   - Prospectus (prospect-us.co.uk/job/) — returns HTTP 403 to automated
+  #     requests (anti-bot), same as the Guardian Jobs exclusion.
+  #   - Harris Hill (harrishill.co.uk) — /jobs/?category=… redirects to a
+  #     JS-rendered /job-results page; vacancies are not in server HTML.
+  #   - Third Sector Jobs (jobs.thirdsector.co.uk) — Madgex board now renders
+  #     the results list client-side; server HTML has only category nav links.
 weights:
   executive_bonus: 50
   director_bonus: 30
