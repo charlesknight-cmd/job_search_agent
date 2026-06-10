@@ -235,10 +235,16 @@ def extract_employer(title: str, description: str, source_name: str) -> str:
         if name.lower() in title.lower() or name.lower() in description[:800].lower():
             return name
 
-    # Capture-group patterns for institution names
+    # Self-terminating capture patterns — prepositions are the only permitted
+    # joiners between capitalised words, so a non-preposition word (e.g. a verb
+    # like "Announces") stops the match naturally without an explicit terminator.
+    # & is included so "Lancaster & Morecambe College" matches correctly.
     patterns = [
-        r"\b(University of (?:the\s+)?[A-Z][a-zA-Z']*(?:\s+(?:of|the|upon|and)?\s*[A-Z][a-zA-Z']*)*)\b",
-        r"\b([A-Z][a-zA-Z']*(?:\s+(?:[A-Z][a-zA-Z']*|of|and|the|for))*\s+(?:University|College|Institute|Trust|Charity)(?:\s+[A-Z][a-zA-Z']*)*)\b",
+        # "University of X" form: optional leading prepositions, then cap word,
+        # then zero-or-more "preposition + cap word" pairs.
+        r"(University of (?:(?:the|of|upon|and|&)\s+)*[A-Z][a-zA-Z&']*(?:\s+(?:the|of|upon|and|&)\s+[A-Z][a-zA-Z&']*)*)",
+        # "X University/College/etc" form: suffix keyword is the natural end.
+        r"([A-Z][a-zA-Z&']*(?:\s+(?:[A-Z][a-zA-Z&']*|of|and|the|for|&))*\s+(?:University|College|Institute|Trust|Charity))",
     ]
     for text in [title, description[:800]]:
         for p in patterns:

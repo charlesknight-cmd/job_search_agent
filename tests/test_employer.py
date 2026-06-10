@@ -54,10 +54,29 @@ class TestEmployerExtraction(unittest.TestCase):
         )
 
     def test_trailing_geography_name(self):
-        # Trailing location word after the suffix keyword
+        # Trailing location word: pattern stops at suffix keyword to avoid over-capture.
+        # "Imperial College" is a clear enough employer name without "London".
         self.assertEqual(
             extract_employer("Imperial College London has a vacancy", "", "jobs.ac.uk"),
-            "Imperial College London",
+            "Imperial College",
+        )
+
+    def test_no_over_capture_title_case_sentence(self):
+        # Regression for dd34b18: trailing Title-Case words (e.g. "Announces New")
+        # must not be pulled into the employer name.
+        self.assertEqual(
+            extract_employer(
+                "Manchester Metropolitan University Announces New Funding", "", "jobs.ac.uk"
+            ),
+            "Manchester Metropolitan University",
+        )
+
+    def test_ampersand_in_name(self):
+        # Regression for dd34b18: & was dropped from the character class, breaking
+        # employer names like "Lancaster & Morecambe College".
+        self.assertEqual(
+            extract_employer("Principal, Lancaster & Morecambe College | Apply", "", "src"),
+            "Lancaster & Morecambe College",
         )
 
 

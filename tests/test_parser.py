@@ -1,6 +1,11 @@
 """Unit tests for BeautifulSoup HTML parsing and description extraction in ``job_search_agent.py``."""
+import os
+import sys
 import unittest
-from job_search_agent import extract_description
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from job_search_agent import extract_description  # noqa: E402
 
 
 class TestDescriptionParser(unittest.TestCase):
