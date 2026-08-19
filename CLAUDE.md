@@ -18,6 +18,8 @@ Owner: Charles Knight (charles.knight@gmail.com)
 
 Profiles are loaded from YAML at startup by `load_profile()` in `job_search_agent.py`. Required keys: `label`, `db_path`, `output_prefix`, `filters`, `sources`, `weights`, `exec_titles`, `title_gate`, `exclusion_terms`. Missing keys fail fast at load time.
 
+Optional keys: `director_titles`, `title_blockers`, `title_blocker_exceptions`, `location_exclude`. Profiles that omit them keep the previous behaviour.
+
 ---
 
 ## How to run
@@ -48,7 +50,7 @@ python job_search_agent.py --profile he --dry-run
 4. **Score** — rule-based relevance scoring using title matching, keyword signals, and exclusion penalties
 5. **Deduplicate** — SQLite database per profile stores job fingerprints; only new jobs appear in reports. URLs already known are touched (`last_seen_at` updated) so stale-marking can detect when a listing actually disappears.
 6. **Stale-mark** — jobs not seen for `STALE_AFTER_HOURS` (default 168h) are marked `status = 'stale'`
-7. **Report** — HTML email report generated and sent via Gmail SMTP
+7. **Report** — cross-board duplicates collapsed (`dedupe_report_rows`), then an HTML email report is generated and sent via Gmail SMTP
 
 ---
 
@@ -66,6 +68,22 @@ Signals (weights vary by profile — see each profile's `weights` block):
 - `exclusion_penalty` — title/description matches `exclusion_terms` (hard negative; short-circuits scoring)
 
 Title gate: jobs whose title doesn't contain any `title_gate` term are dropped before description fetch.
+
+Title blockers: `exec_titles` are matched as substrings, so a bare term like `principal` (the head of a
+Scottish university) also fired on "Principal Lecturer" and "Principal Product Manager", handing them the
+full executive bonus. `title_blockers` phrases are stripped from the title before exec/director matching;
+`title_blocker_exceptions` (e.g. `vice-principal`) are masked first so genuine compound titles survive.
+
+Geography gate (`location_exclude`): matched against the listing card's employer + location text — never the
+description — so overseas roles are dropped before the detail fetch. A second, authoritative check runs on
+the detail page: a schema.org posting declaring a non-UK `addressCountry` is dropped (`is_overseas_posting`).
+That check is deliberately one-sided — a posting with no stated country is treated as UK, because most
+sources publish no JSON-LD and are UK-only firms.
+
+Cross-board dedup (`dedupe_report_rows`): DB dedup is by URL, which cannot see that jobs.ac.uk, THE UniJobs
+and Minerva each carry their own URL for one vacancy. At report time, rows sharing an employer whose title
+token sets are subsets of one another are merged, highest score winning. Applied at report time only, so
+each board keeps its own row for stale-marking and source attribution.
 
 Senior+interim handling: if a senior title is matched and the description suggests interim/fixed-term, the job is tagged "Strategic Interim" rather than penalised.
 
@@ -129,6 +147,18 @@ Coverage focus: `score_job` (including the regression test for the `non-permanen
 ---
 
 ## Known limitations
+
+- Audit (August 2026): all sources verified live and healthy; four scoring/reporting defects fixed. Bare
+  acronym keys in `EXPERTISE_MAP` were matching job reference numbers (`"ref "` matched "Job Ref 1310",
+  `"tef"` matched "TEFL"), awarding the +20 expertise bonus — on its own enough to clear HE's
+  `minimum_score` of 20 — to wholly irrelevant roles. Add new acronyms as spelled-out phrases or
+  space-wrapped, never bare.
+- Geography gate residual gap: it matches country and territory names on the listing card, not town names,
+  which collide with UK places (Perth, Birmingham and Newcastle all exist twice). A role advertised by a UK
+  employer but *based* overseas — e.g. "Deputy Dean of the Derby Institute of Hunan University of
+  Technology", advertised by the University of Derby — still gets through when its detail page carries no
+  JSON-LD country. jobs.ac.uk exposes no location facet in its server-rendered search (the facets are JS),
+  so there is no way to constrain this at the source URL.
 
 - Odgers Berndtson excluded — vacancies are JavaScript-rendered, not in HTML source
 - Source audit (June 2026): many boards had silently gone dry (selector rot or a move to client-side rendering). Repaired by selector fix (Peridot, CharityJob, NFP Consulting), card-heading title fallback (Dixon Walter), or by switching to a server-rendered data path that bypasses the JS app: **THE UniJobs** via its Madgex RSS feed (`format: rss`), **Veredus** via its WP Job Manager jobs feed (`format: rss`), **Minerva Search** via the role links still present in its HTML. Working sources after the audit: jobs.ac.uk, THE UniJobs, Peridot, Dixon Walter, Minerva, Veredus (HE); CharityJob, NFP People, NFP Consulting (charity/sector).

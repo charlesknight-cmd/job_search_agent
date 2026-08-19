@@ -247,3 +247,140 @@ exclusion_terms:
   - security officer
   - catering
   - porter
+
+# Geography gate (optional). Matched as substrings against the listing card's
+# employer + location text — never the description — before the detail page is
+# fetched, so overseas roles cost nothing and cannot reach the report. jobs.ac.uk
+# carries no location facet in its server-rendered search (the facets are JS), so
+# filtering has to happen on our side; it does put the employer and a "Location:"
+# line on every result card, which is what this matches. A second, authoritative
+# check runs on the detail page: a schema.org posting declaring a non-UK
+# addressCountry is dropped too (see is_overseas_posting).
+#
+# Country and territory names only. Town names are deliberately excluded — they
+# collide with UK places (Perth, Birmingham, Newcastle all exist twice) — which
+# is why a role advertised solely by an unfamiliar town and whose detail page
+# carries no JSON-LD can still slip through. Observed live June/August 2026:
+# University of Auckland, British University of Bahrain, Hang Seng University of
+# Hong Kong and Xi'an Jiaotong-Liverpool all advertise senior roles on jobs.ac.uk.
+location_exclude:
+  - new zealand
+  - australia
+  - hong kong
+  - macau
+  - singapore
+  - china
+  - taiwan
+  - japan
+  - south korea
+  - malaysia
+  - thailand
+  - vietnam
+  - indonesia
+  - philippines
+  - india
+  - pakistan
+  - bangladesh
+  - sri lanka
+  - bahrain
+  - qatar
+  - kuwait
+  - oman
+  - united arab emirates
+  - abu dhabi
+  - dubai
+  - saudi arabia
+  - jordan
+  - lebanon
+  - turkey
+  - egypt
+  - morocco
+  - nigeria
+  - ghana
+  - kenya
+  - tanzania
+  - uganda
+  - rwanda
+  - ethiopia
+  - south africa
+  - botswana
+  - namibia
+  - zimbabwe
+  - mauritius
+  - united states
+  - u.s.a
+  - canada
+  - mexico
+  - brazil
+  - chile
+  - argentina
+  - colombia
+  - germany
+  - france
+  - netherlands
+  - belgium
+  - luxembourg
+  - spain
+  - portugal
+  - italy
+  - switzerland
+  - austria
+  - sweden
+  - norway
+  - denmark
+  - finland
+  - iceland
+  - poland
+  - czech
+  - hungary
+  - romania
+  - bulgaria
+  - croatia
+  - greece
+  - cyprus
+  - malta
+  # Republic of Ireland only — "ireland" alone would match Northern Ireland,
+  # which is in the UK.
+  - republic of ireland
+  - kazakhstan
+  - uzbekistan
+  - azerbaijan
+  - fiji
+
+# Title fragments that disqualify an executive/director title match. exec_titles
+# are matched as substrings, and "principal" has to stay in that list because it
+# is the head of a Scottish university — but it also fired on "Principal
+# Lecturer", "Principal Product Manager" and "Principal Academic Partnership
+# Lead", handing each the full +50 executive bonus and ranking them above real
+# directorships. These phrases are stripped from the title before matching, so a
+# genuine compound title ("Deputy Principal and Dean") is unaffected.
+title_blockers:
+  - principal lecturer
+  - principal teaching fellow
+  - principal research fellow
+  - principal fellow
+  - principal investigator
+  - principal academic
+  - principal engineer
+  - principal scientist
+  - principal analyst
+  - principal consultant
+  - principal developer
+  - principal technician
+  - principal product manager
+  - principal product
+  - principal software
+  - principal data
+  - principal designer
+  - principal architect
+
+# Genuine leadership titles that contain one of the blockers above and must
+# survive it — "Vice-Principal Academic" contains "principal academic". These
+# are masked before blockers are stripped, then restored.
+title_blocker_exceptions:
+  - vice-principal
+  - vice principal
+  - deputy principal
+  - depute principal
+  - principal and vice-chancellor
+  - principal and vice chancellor

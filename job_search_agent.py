@@ -42,7 +42,7 @@ def setup_logging(level: int = logging.INFO, log_file: str = "job_search.log") -
         return
     root.setLevel(level)
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    fh = logging.FileHandler(log_file)
+    fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setFormatter(formatter)
     sh = logging.StreamHandler()
     sh.setFormatter(formatter)
@@ -466,8 +466,21 @@ EXPERTISE_MAP = {
     "ntfs": "NTFS",
     "fellowship": "Fellowship",
     "teaching excellence framework": "TEF",
-    "tef": "TEF",
-    "ref ": "REF",
+    # Bare-acronym keys are matched as substrings, so they must be tight.
+    # " tef " (spaced, per the convention above) keeps "TEFL" out. "ref"
+    # cannot be rescued by spacing at all — job listings are full of
+    # reference numbers ("Job Ref 1310"), and " ref " matches those too.
+    # Since the expertise bonus is awarded once and is worth +20 (enough on
+    # its own to clear the HE minimum_score of 20), a reference number was
+    # putting wholly irrelevant roles into the report. Match the spelled-out
+    # framework and the exercise's cycle labels instead.
+    " tef ": "TEF",
+    "research excellence framework": "REF",
+    "ref 2021": "REF",
+    "ref 2029": "REF",
+    "ref2029": "REF",
+    "ref submission": "REF",
+    "ref exercise": "REF",
     "accreditation": "Accreditation",
     "quality assurance": "Quality Assurance",
     "ai in education": "AI in Education",
@@ -513,6 +526,42 @@ EXPERTISE_MAP = {
 MAX_EXPERTISE_TAGS = 3
 
 
+def strip_title_blockers(
+    title: str, blockers: List[str], exceptions: Optional[List[str]] = None
+) -> str:
+    """Remove disqualifying phrases from a title before executive matching.
+
+    ``exec_titles`` are matched as substrings, so a bare term like "principal"
+    (legitimately the head of a Scottish university) also fired on "Principal
+    Lecturer", "Principal Product Manager" and "Principal Academic Partnership
+    Lead" — awarding the full executive bonus to mid-level individual-contributor
+    roles, which then outranked genuine directorships.
+
+    Stripping the blocker phrase rather than rejecting the whole title keeps
+    compound titles working: "Deputy Principal and Dean" still matches "dean".
+
+    ``exceptions`` are masked before stripping and restored afterwards, because
+    some genuine leadership titles *contain* a blocker: "Vice-Principal Academic"
+    contains "principal academic", and stripping it would drop a real senior
+    role. Longest exceptions are masked first so a shorter one cannot consume
+    part of a longer match. Both lists are profile-supplied and optional, so
+    profiles that set neither are unaffected.
+    """
+    exceptions = sorted(exceptions or [], key=len, reverse=True)
+    masked = []
+    for phrase in exceptions:
+        if phrase in title:
+            # Sentinel cannot occur in a real title (no spaces, digit-suffixed).
+            token = f"__blocked{len(masked)}__"
+            title = title.replace(phrase, token)
+            masked.append((token, phrase))
+    for blocker in blockers:
+        title = title.replace(blocker, " ")
+    for token, phrase in masked:
+        title = title.replace(token, phrase)
+    return title
+
+
 def score_job(job: Job, config: Dict) -> Job:
     w = config["weights"]
     full_text = f"{job.title} {job.description}".lower()
@@ -528,11 +577,18 @@ def score_job(job: Job, config: Dict) -> Job:
         job.match_reasons.append("Excluded")
         return job
 
-    # 2. Executive title
-    if any(t in job.title.lower() for t in config["exec_titles"]):
+    # 2. Executive title. Matched against the blocker-stripped title so
+    # individual-contributor roles that merely share a word with a leadership
+    # title ("Principal Lecturer") don't collect the executive bonus.
+    gated_title = strip_title_blockers(
+        job.title.lower(),
+        config.get("title_blockers", []),
+        config.get("title_blocker_exceptions", []),
+    )
+    if any(t in gated_title for t in config["exec_titles"]):
         job.score += w["executive_bonus"]
         job.match_reasons.append("Executive Level")
-    elif w.get("director_bonus") and any(t in job.title.lower() for t in config.get("director_titles", [])):
+    elif w.get("director_bonus") and any(t in gated_title for t in config.get("director_titles", [])):
         job.score += w["director_bonus"]
         job.match_reasons.append("Director Level")
 
@@ -826,7 +882,7 @@ async def fetch_with_retry(client: httpx.AsyncClient, url: str) -> Optional[http
                 return resp
             logger.warning(f"HTTP {resp.status_code} on {url} — skipping")
             return None
-        except (httpx.TimeoutException, httpx.NetworkError) as e:
+        except httpx.TransportError as e:
             if attempt < MAX_RETRIES:
                 wait = RETRY_BACKOFF * (attempt + 1) + random.uniform(0, 1.0)
                 logger.warning(f"Network error on {url}: {e} — retrying in {wait:.1f}s")
@@ -909,6 +965,65 @@ def _render_source_panel(source_stats: List[SourceStats]) -> str:
         f"<tbody>{''.join(rows)}</tbody>"
         "</table></div>"
     )
+
+
+# Titles that are this short carry too little signal to merge on — "Dean"
+# is a subset of every dean title at an employer, so requiring a few tokens
+# stops one generic listing swallowing distinct roles.
+MIN_MERGE_TOKENS = 3
+
+
+def _title_tokens(title: str, employer: str) -> set:
+    """Normalise a listing title to a token set for cross-board comparison.
+
+    The same vacancy is titled differently by each board: jobs.ac.uk gives
+    "Deputy Vice-Chancellor and Provost", THE UniJobs prefixes the employer
+    ("UNIVERSITY OF SUSSEX: Deputy Vice-Chancellor and Provost"), and Minerva
+    appends it ("... , University of Sussex"). Dropping the employer's own
+    tokens and all punctuation leaves the three forms comparable.
+    """
+    stop = {"the", "of", "and", "a", "an", "at", "for", "in"}
+    employer_tokens = set(re.findall(r"[a-z0-9]+", (employer or "").lower()))
+    tokens = set(re.findall(r"[a-z0-9]+", (title or "").lower()))
+    return tokens - employer_tokens - stop
+
+
+def dedupe_report_rows(rows: list) -> list:
+    """Collapse rows that are the same vacancy listed on more than one board.
+
+    Database dedup is by URL, which cannot see that jobs.ac.uk, THE UniJobs and
+    Minerva each carry their own URL for one vacancy — so a single role reached
+    the report two to four times, at different scores (the boards' differing
+    description text scores differently). Merge at report time rather than at
+    upsert so each board keeps its own row for stale-marking and source
+    attribution; only the reading list is collapsed.
+
+    Two rows merge when they share an employer and one's title token set is a
+    subset of the other's — which is exactly the prefix/suffix relationship the
+    boards create, while leaving genuinely different roles at the same employer
+    ("Director of Finance" vs "Director of Estates") apart. The highest-scoring
+    row wins, so the merged entry keeps the richest description available.
+    """
+    kept: list = []
+    kept_keys: List[tuple] = []
+    for row in sorted(rows, key=lambda r: (r["score"] or 0), reverse=True):
+        employer = (row["employer"] or "").strip().lower()
+        tokens = _title_tokens(row["title"], row["employer"])
+        merged = False
+        if employer and len(tokens) >= MIN_MERGE_TOKENS:
+            for kept_employer, kept_tokens in kept_keys:
+                if kept_employer != employer:
+                    continue
+                if tokens <= kept_tokens or kept_tokens <= tokens:
+                    merged = True
+                    break
+        if merged:
+            continue
+        kept.append(row)
+        kept_keys.append((employer, tokens))
+    # Restore the score ordering get_recent produced (sorted() above is stable,
+    # and rows arrive score-descending, so this is already the right order).
+    return kept
 
 
 def generate_html_report(
@@ -1091,6 +1206,82 @@ def extract_card_employer(link) -> Optional[str]:
     return text or None
 
 
+def extract_card_location(link) -> Optional[str]:
+    """Pull the advertised location from the listing card wrapping a title link.
+
+    jobs.ac.uk renders it as an unclassed ``<div>`` reading "Location: Auckland"
+    inside ``.j-search-result__result`` — there is no class to select, so match
+    on the label text. Reading it at listing time lets the geography gate drop
+    overseas roles *before* paying for a detail fetch. Returns ``None`` when no
+    location node is found (every non-jobs.ac.uk source, which is why the gate
+    is a no-op for them).
+    """
+    card = link.find_parent(class_="j-search-result__result")
+    if card is None:
+        return None
+    for div in card.find_all("div"):
+        text = div.get_text(" ", strip=True)
+        if text.lower().startswith("location:"):
+            return text.split(":", 1)[1].strip() or None
+    return None
+
+
+# --- GEOGRAPHY GATE ---
+# Country names as they appear in schema.org ``addressCountry`` for the UK.
+# A posting that states a country outside this set is dropped before scoring.
+# Short codes must match the whole field: "uk" as a substring would treat
+# Ukraine as British, and "gb" would match Gabon.
+UK_COUNTRY_CODES = {"uk", "u.k.", "gb", "gbr", "uk."}
+UK_COUNTRY_NAMES = (
+    "united kingdom", "great britain", "england", "scotland",
+    "northern ireland", "wales",
+)
+# Checked before UK_COUNTRY_NAMES: "New South Wales" contains "wales".
+NON_UK_OVERRIDES = ("new south wales",)
+
+
+def _jsonld_country(loc) -> str:
+    """Return the ``addressCountry`` of a ``jobLocation``, lowercased, or "".
+
+    Used as the authoritative backstop to the listing-card geography gate: the
+    card only names a town ("Auckland", "Saar"), which is not decisive on its
+    own, whereas a stated country is.
+    """
+    if isinstance(loc, list):
+        for item in loc:
+            country = _jsonld_country(item)
+            if country:
+                return country
+        return ""
+    if not isinstance(loc, dict):
+        return ""
+    address = loc.get("address")
+    if not isinstance(address, dict):
+        return ""
+    country = address.get("addressCountry")
+    if isinstance(country, dict):
+        country = country.get("name")
+    return country.strip().lower() if isinstance(country, str) else ""
+
+
+def is_overseas_posting(posting: Dict) -> bool:
+    """True when a JSON-LD posting explicitly states a non-UK country.
+
+    Deliberately one-sided: a posting with no stated country is treated as UK,
+    because most sources (Peridot, Dixon Walter, Minerva, Veredus) publish no
+    JSON-LD at all and are UK-only firms anyway. Only an explicit foreign
+    country drops the role.
+    """
+    country = _jsonld_country(posting.get("jobLocation"))
+    if not country:
+        return False
+    if any(term in country for term in NON_UK_OVERRIDES):
+        return True
+    if country in UK_COUNTRY_CODES:
+        return False
+    return not any(term in country for term in UK_COUNTRY_NAMES)
+
+
 def extract_link_title(link) -> str:
     """Return the job title for a listing anchor, with a card-heading fallback.
 
@@ -1199,14 +1390,22 @@ async def _scrape_source(
     # (title, href, card_employer) entries: an HTML page parsed with a CSS
     # selector, or an RSS/Atom feed (format: rss) for sources that dropped their
     # HTML listing for a JS app but still publish a server-rendered feed.
+    # Entries are 4-tuples: (title, href, card_employer, card_context). The
+    # context is the card's own employer + location text, which the geography
+    # gate matches against; feeds carry no listing card, so it is empty there
+    # (parse_feed_entries keeps its 3-tuple contract and is padded here).
     if src.get("format") == "rss":
-        entries = parse_feed_entries(listing_resp.text)
+        entries = [(t, l, e, "") for t, l, e in parse_feed_entries(listing_resp.text)]
     else:
         soup = BeautifulSoup(listing_resp.text, "html.parser")
-        entries = [
-            (extract_link_title(a), a.get("href", ""), extract_card_employer(a))
-            for a in soup.select(src["selector"])
-        ]
+        entries = []
+        for a in soup.select(src["selector"]):
+            card_employer = extract_card_employer(a)
+            card_location = extract_card_location(a)
+            context = " ".join(x for x in (card_employer, card_location) if x)
+            entries.append(
+                (extract_link_title(a), a.get("href", ""), card_employer, context)
+            )
     stats.links_matched = len(entries)
     # Per-source match count surfaces dead selectors/feeds passively in the log —
     # any source returning 0 matches across consecutive runs is a candidate
@@ -1217,7 +1416,12 @@ async def _scrape_source(
 
     candidates = []
     seen_candidate_urls = set()
-    for raw_title, href, card_employer in entries:
+    # Optional per-profile geography gate. Matched against the listing card's
+    # employer + location text only (never the description), so it fires on
+    # "University of Auckland, New Zealand" but not on a UK role whose JD
+    # happens to mention an overseas partnership.
+    location_exclude = cfg.get("location_exclude", [])
+    for raw_title, href, card_employer, card_context in entries:
         if not href or len(raw_title) < 10:
             continue
         url = urljoin(src["url"], href)
@@ -1231,6 +1435,12 @@ async def _scrape_source(
 
         if not any(t in raw_title.lower() for t in cfg["title_gate"]):
             continue
+
+        if location_exclude and card_context:
+            context = card_context.lower()
+            if any(t in context for t in location_exclude):
+                logger.debug(f"{src['name']}: geography gate dropped {raw_title!r}")
+                continue
 
         if url in seen_candidate_urls:
             continue
@@ -1263,6 +1473,12 @@ async def _scrape_source(
             # The first two are reliable; the regex heuristic and source-name
             # fallback only fire when neither is present.
             posting = parse_jobposting_jsonld(det.text)
+            # Authoritative geography backstop. The listing card only names a
+            # town, which is not decisive; a stated country is. Only drops a
+            # role when the posting explicitly declares a non-UK country.
+            if location_exclude and is_overseas_posting(posting):
+                logger.debug(f"{src['name']}: overseas posting dropped — {url}")
+                return None
             job.employer = (
                 posting.get("employer")
                 or card_employer
@@ -1442,6 +1658,12 @@ async def process_profile(profile_key: str, weekly: bool, dry_run: bool = False)
         daily_window = cfg["filters"].get("daily_window_hours", 24)
         window_hours = 168 if weekly else daily_window
         recent = db.get_recent(window_hours, cfg["filters"]["minimum_score"])
+        deduped = dedupe_report_rows(recent)
+        if len(deduped) != len(recent):
+            logger.info(
+                f"Collapsed {len(recent) - len(deduped)} cross-board duplicate(s)"
+            )
+        recent = deduped
         fname = f"{cfg['output_prefix']}{'weekly_digest' if weekly else 'new_jobs_report'}.html"
         generate_html_report(
             recent,

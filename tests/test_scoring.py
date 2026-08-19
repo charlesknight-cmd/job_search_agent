@@ -15,6 +15,7 @@ from job_search_agent import (  # noqa: E402
     SECTOR_BODIES_CONFIG,
     extract_salary,
     score_job,
+    strip_title_blockers,
 )
 
 
@@ -642,6 +643,111 @@ class TestProfileFloorValidation(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_profile("broken", profiles_dir=Path(td))
             self.assertIn("remote_salary_floor", str(ctx.exception))
+
+
+class TestAcronymFalsePositives(unittest.TestCase):
+    """Bare acronym keys in EXPERTISE_MAP are matched as substrings.
+
+    The expertise bonus is awarded once and is worth +20 for HE — on its own
+    enough to clear the profile's minimum_score of 20 — so a spurious match put
+    wholly irrelevant roles into the report.
+    """
+
+    def test_job_reference_number_does_not_score_as_ref(self):
+        # Regression: the key "ref " matched "Job Ref 1310". Reference numbers
+        # are ubiquitous on listings; four live Veredus roles scored exactly
+        # 20.0 on this alone during the August 2026 audit.
+        job = _make_job(
+            "Programme Director, MBChB",
+            "Applications are invited. Job Ref 1310. Closing date 1 September.",
+        )
+        score_job(job, HE_CONFIG)
+        self.assertNotIn("REF", job.match_reasons)
+
+    def test_genuine_ref_mentions_still_score(self):
+        for description in [
+            "The next Research Excellence Framework submission is a priority.",
+            "You will lead our REF 2029 preparations.",
+            "Responsible for the REF submission across the faculty.",
+        ]:
+            with self.subTest(description=description):
+                job = _make_job("Programme Director", description)
+                score_job(job, HE_CONFIG)
+                self.assertIn("REF", job.match_reasons)
+
+    def test_tefl_does_not_score_as_tef(self):
+        # Regression: the bare key "tef" matched "TEFL", which is unrelated.
+        job = _make_job("Programme Director", "We deliver TEFL courses.")
+        score_job(job, HE_CONFIG)
+        self.assertNotIn("TEF", job.match_reasons)
+
+    def test_genuine_tef_mentions_still_score(self):
+        job = _make_job("Programme Director", "Our TEF gold rating reflects this.")
+        score_job(job, HE_CONFIG)
+        self.assertIn("TEF", job.match_reasons)
+
+
+class TestTitleBlockers(unittest.TestCase):
+    """"principal" must stay an exec title (head of a Scottish university)
+    while not firing on individual-contributor roles that share the word."""
+
+    def test_individual_contributor_principals_are_not_executive(self):
+        for title in [
+            "Principal Lecturer in Civil Engineering",
+            "Principal Product Manager - Ellucian SaaS",
+            "Principal Academic Partnership Lead (UK)",
+            "Principal Research Fellow",
+            "Principal Investigator, Cancer Studies",
+        ]:
+            with self.subTest(title=title):
+                job = _make_job(title, "A permanent post.")
+                score_job(job, HE_CONFIG)
+                self.assertNotIn("Executive Level", job.match_reasons)
+
+    def test_genuine_principal_roles_stay_executive(self):
+        for title in [
+            "Principal of the University",
+            "Principal and Vice-Chancellor",
+            "Vice-Principal Academic",
+            "Deputy Principal and Dean",
+        ]:
+            with self.subTest(title=title):
+                job = _make_job(title, "A permanent post.")
+                score_job(job, HE_CONFIG)
+                self.assertIn("Executive Level", job.match_reasons)
+
+    def test_blocked_title_ranks_below_a_genuine_leadership_role(self):
+        blocked = _make_job("Principal Lecturer in Civil Engineering", "A permanent post.")
+        genuine = _make_job("Executive Dean", "A permanent post.")
+        score_job(blocked, HE_CONFIG)
+        score_job(genuine, HE_CONFIG)
+        self.assertLess(blocked.score, genuine.score)
+
+
+class TestStripTitleBlockers(unittest.TestCase):
+    def test_strips_a_blocker(self):
+        self.assertNotIn(
+            "principal lecturer",
+            strip_title_blockers("principal lecturer in law", ["principal lecturer"]),
+        )
+
+    def test_leaves_other_titles_intact(self):
+        result = strip_title_blockers(
+            "deputy principal and dean", ["principal lecturer"]
+        )
+        self.assertIn("dean", result)
+
+    def test_exception_is_protected_from_a_blocker_it_contains(self):
+        # "vice-principal academic" contains the blocker "principal academic".
+        result = strip_title_blockers(
+            "vice-principal academic",
+            ["principal academic"],
+            ["vice-principal"],
+        )
+        self.assertIn("vice-principal", result)
+
+    def test_no_blockers_is_a_passthrough(self):
+        self.assertEqual(strip_title_blockers("executive dean", []), "executive dean")
 
 
 if __name__ == "__main__":
