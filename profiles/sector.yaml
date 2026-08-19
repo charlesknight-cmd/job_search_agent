@@ -112,3 +112,102 @@ exclusion_terms:
   - it director
   - digital director
   - hr director
+
+# Geography gate (optional). Matched as substrings against the listing card's
+# employer + location text — never the description — before the detail page is
+# fetched, so overseas roles cost nothing and cannot reach the report. jobs.ac.uk
+# carries no location facet in its server-rendered search (the facets are JS), so
+# filtering has to happen on our side; it does put the employer and a "Location:"
+# line on every result card, which is what this matches. A second, authoritative
+# check runs on the detail page: a schema.org posting declaring a non-UK
+# addressCountry is dropped too (see is_overseas_posting).
+#
+# Country and territory names only. Town names are deliberately excluded — they
+# collide with UK places (Perth, Birmingham, Newcastle all exist twice) — which
+# is why a role advertised solely by an unfamiliar town and whose detail page
+# carries no JSON-LD can still slip through. Observed live June/August 2026:
+# University of Auckland, British University of Bahrain, Hang Seng University of
+# Hong Kong and Xi'an Jiaotong-Liverpool all advertise senior roles on jobs.ac.uk.
+location_exclude:
+  - new zealand
+  - australia
+  - hong kong
+  - macau
+  - singapore
+  - china
+  - taiwan
+  - japan
+  - south korea
+  - malaysia
+  - thailand
+  - vietnam
+  - indonesia
+  - philippines
+  - india
+  - pakistan
+  - bangladesh
+  - sri lanka
+  - bahrain
+  - qatar
+  - kuwait
+  - oman
+  - united arab emirates
+  - abu dhabi
+  - dubai
+  - saudi arabia
+  - jordan
+  - lebanon
+  - turkey
+  - egypt
+  - morocco
+  - nigeria
+  - ghana
+  - kenya
+  - tanzania
+  - uganda
+  - rwanda
+  - ethiopia
+  - south africa
+  - botswana
+  - namibia
+  - zimbabwe
+  - mauritius
+  - united states
+  - u.s.a
+  - canada
+  - mexico
+  - brazil
+  - chile
+  - argentina
+  - colombia
+  - germany
+  - france
+  - netherlands
+  - belgium
+  - luxembourg
+  - spain
+  - portugal
+  - italy
+  - switzerland
+  - austria
+  - sweden
+  - norway
+  - denmark
+  - finland
+  - iceland
+  - poland
+  - czech
+  - hungary
+  - romania
+  - bulgaria
+  - croatia
+  - greece
+  - cyprus
+  - malta
+  # Republic of Ireland only — "ireland" alone would match Northern Ireland,
+  # which is in the UK.
+  - republic of ireland
+  - kazakhstan
+  - uzbekistan
+  - azerbaijan
+  - fiji
